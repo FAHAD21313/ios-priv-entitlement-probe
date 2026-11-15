@@ -297,6 +297,101 @@ enum Sandbox {
     }
 }
 
+// MARK: - Trust evaluation (iOS-valid)
+//
+// NOTE: `SecRequirementCreateWithString("anchor apple")` fails with
+// errSecParam (-50) on iOS — the "apple" anchor clause is not part of the
+// iOS requirement grammar.  The iOS-valid way to ask the same question is to
+// build a trust on our own certificate chain and ask the system to evaluate it.
+
+enum TrustProbe {
+    typealias CopySigningInfo = @convention(c) (CFTypeRef, CFOptionFlags, CFDictionaryRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CreateTrust = @convention(c) (CFTypeRef, CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias EvaluateTrust = @convention(c) (CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
+    typealias CopyAnchor = @convention(c) (CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+
+    static let copySigningInfo: CopySigningInfo? = {
+        guard let s = DynSec.sym("SecStaticCodeCopySigningInformation") else { return nil }
+        return unsafeBitCast(s, to: CopySigningInfo.self)
+    }()
+    static let createTrust: CreateTrust? = {
+        guard let s = DynSec.sym("SecTrustCreateWithCertificates") else { return nil }
+        return unsafeBitCast(s, to: CreateTrust.self)
+    }()
+    static let evaluateTrust: EvaluateTrust? = {
+        guard let s = DynSec.sym("SecTrustEvaluateWithError") else { return nil }
+        return unsafeBitCast(s, to: EvaluateTrust.self)
+    }()
+    static let copyAnchor: CopyAnchor? = {
+        guard let s = DynSec.sym("SecTrustCopyAnchor") else { return nil }
+        return unsafeBitCast(s, to: CopyAnchor.self)
+    }()
+
+    static func run() -> [(String, String)] {
+        var out: [(String, String)] = []
+        guard let mkCode = DynSec.createStaticCode,
+              let copyInfo = copySigningInfo,
+              let mkTrust = createTrust,
+              let evaluate = evaluateTrust else {
+            out.append(("trust", "symbols-unavailable"))
+            return out
+        }
+        var codeRef: CFTypeRef?
+        guard mkCode(Bundle.main.bundleURL as CFURL, nil, &codeRef) == 0, let code = codeRef else {
+            out.append(("trust", "no-staticcode"))
+            return out
+        }
+        var infoRef: CFTypeRef?
+        let ierr = copyInfo(code, 0, nil, &infoRef)
+        guard ierr == 0, let info = infoRef as? [String: Any] else {
+            out.append(("signing-information", "failed(\(ierr))"))
+            return out
+        }
+        out.append(("signing-information", "ok"))
+        out.append(("signing-information-keys", info.keys.sorted().joined(separator: ",")))
+
+        // The certificate chain we are signed with.
+        var chain: [Any] = []
+        for key in ["kSecCSInfoCertificatesAsArray", "certificates"] {
+            if let v = info[key] as? [Any] { chain = v; out.append(("chain-key", key)); break }
+        }
+        out.append(("chain-count", String(chain.count)))
+        for (i, c) in chain.enumerated() {
+            if let cert = c as? SecCertificate {
+                let sub = SecCertificateCopySubjectSummary(cert) as String? ?? "-"
+                out.append(("chain[\(i)]-subject", sub))
+            }
+        }
+
+        // Ask the system to evaluate that chain.
+        guard !chain.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
+        for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
+                                ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
+            var trustRef: CFTypeRef?
+            let terr = mkTrust(chain as CFArray, policy, &trustRef)
+            guard terr == 0, let trust = trustRef else {
+                out.append(("trust-\(label)", "create-failed(\(terr))"))
+                continue
+            }
+            var err: Unmanaged<CFError>?
+            let v = evaluate(trust, &err)
+            out.append(("trust-\(label)", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
+            if let copyAnchor = copyAnchor {
+                var anchorRef: CFTypeRef?
+                if copyAnchor(trust, &anchorRef) == 0, let anchor = anchorRef as? SecCertificate {
+                    let sub = SecCertificateCopySubjectSummary(anchor) as String? ?? "-"
+                    out.append(("trust-\(label)-anchor", sub))
+                    if let d = SecCertificateCopyData(anchor) as Data? {
+                        out.append(("trust-\(label)-anchor-sha256",
+                                    d.map { String(format: "%02x", $0) }.joined().description))
+                    }
+                }
+            }
+        }
+        return out
+    }
+}
+
 // MARK: - Trust-anchor probe (the "anchor apple" clause)
 
 enum AnchorProbe {
@@ -379,6 +474,28 @@ enum InstallProbe {
             }
             let hits = selectors.filter { s in interesting.contains { $0.isEmpty ? false : s.contains($0) } }
             out.append(("selectors:\(name)", hits.isEmpty ? "none" : hits.joined(separator: " | ")))
+
+            // Type encodings: they tell us the exact shape of every argument,
+            // which is what is needed to call these safely.
+            if !hits.isEmpty {
+                var enc: [String] = []
+                var mcount: UInt32 = 0
+                if let mlist = class_copyMethodList(object_getClass(cls), &mcount) {
+                    for i in 0..<Int(mcount) {
+                        let m = mlist[i]
+                        let sel = method_getName(m)
+                        let name = NSStringFromSelector(sel)
+                        guard hits.contains(name) else { continue }
+                        if let t = method_getTypeEncoding(m) {
+                            enc.append("\(name) :: \(String(cString: t))")
+                        }
+                    }
+                    free(mlist)
+                }
+                if !enc.isEmpty {
+                    out.append(("encodings:\(name)", enc.joined(separator: " | ")))
+                }
+            }
         }
 
         // NOTE: we deliberately do NOT invoke the coordinator from the app.
@@ -466,7 +583,16 @@ func runHarness() -> String {
         } else {
             r.add("profile-kind", "raw-plist-or-small")
         }
-        if let plist = try? PropertyListSerialization.propertyList(from: profData, options: [], format: nil),
+        // A real mobileprovision is a CMS (DER) wrapper around the plist, so
+        // parse the plist out of the container rather than the whole file.
+        var plistData: Data? = nil
+        if let xml = profData.range(of: Data("<?xml".utf8)) {
+            plistData = profData[xml.lowerBound...]
+        } else if let bin = profData.range(of: Data("bplist00".utf8)) {
+            plistData = profData[bin.lowerBound...]
+        }
+        if let pd = plistData,
+           let plist = try? PropertyListSerialization.propertyList(from: pd, options: [], format: nil),
            let dict = plist as? [String: Any] {
             r.add("profile-keys", dict.keys.sorted().joined(separator: ","))
             r.add("profile-apple-internal-profile", (dict["AppleInternalProfile"] as? Bool) == true ? "true" : "false")
@@ -498,6 +624,7 @@ func runHarness() -> String {
     // 5. anchor set -----------------------------------------------------------
     r.section("ANCHOR")
     for (k, v) in AnchorProbe.run() { r.add(k, v) }
+    for (k, v) in TrustProbe.run() { r.add(k, v) }
 
     // 6. the privileged install channel --------------------------------------
     r.section("INSTALL")
