@@ -372,10 +372,9 @@ enum TrustProbe {
             return out
         }
 
-        var values: [UnsafeRawPointer?] = certsFound.map { c in
-            UnsafeRawPointer(Unmanaged.passUnretained(c).toOpaque())
-        }
-        let chain = CFArrayCreate(nil, &values, CFIndex(values.count), nil)
+        // SecTrustCreateWithCertificates accepts a single certificate as well
+        // as an array, so no CFArray has to be built.
+        let chain = certsFound[0]
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString))] {
@@ -627,50 +626,6 @@ enum LogProbe {
     }
 }
 
-// MARK: - The privileged install attempt
-//
-// The Objective-C type encodings measured on the device give the exact shape
-// of the entry points:
-//
-//   _beginInstallForURL:forPersonaUniqueString:consumeSource:options:progressBlock:completion:
-//       v60@0:8@16@24B32@36@?44@?52
-//       (url, personaUniqueString, BOOL consumeSource, options, progressBlock, completion)
-//
-//   installApplication:options:completion:  v40@0:8@16@24@?32
-//       (appRecord, options, completion)
-//
-// We call the first one because every argument is constructible.  It runs LAST
-// in the harness, after the report has been written to disk, because an
-// Objective-C exception cannot be caught from Swift and would lose the report.
-
-enum InstallAttempt {
-    static func attempt() -> String {
-        guard let cls = NSClassFromString("IXAppInstallCoordinator") else { return "no-class" }
-        let sel = Selector("_beginInstallForURL:forPersonaUniqueString:consumeSource:options:progressBlock:completion:")
-        guard let method = class_getClassMethod(cls, sel) else { return "no-selector" }
-        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            return "no-documents-dir"
-        }
-        let url = URL(fileURLWithPath: docs.appendingPathComponent("probe-install-test.zip").path)
-        var outcome = "no-callback"
-        let progress: @convention(block) (Any?) -> Void = { _ in outcome = "progress" }
-        let completion: @convention(block) (Any?) -> Void = { obj in
-            outcome = "completion=\(String(describing: obj))"
-        }
-        let inv = NSInvocation(method: method)
-        inv.target = cls
-        inv.selector = sel
-        inv.setArgument(url as NSURL, at: 2)
-        inv.setArgument(NSNull(), at: 3)
-        inv.setArgument(NSNumber(value: false), at: 4)
-        inv.setArgument(NSDictionary(), at: 5)
-        inv.setArgument(progress, at: 6)
-        inv.setArgument(completion, at: 7)
-        inv.invoke()
-        return "invoked: \(outcome)"
-    }
-}
-
 // MARK: - Harness
 
 func runHarness() -> String {
@@ -790,24 +745,8 @@ func runHarness() -> String {
 
     r.add("=== end (before the install attempt) ===")
 
-    // Write the report to disk BEFORE the risky call: an Objective-C exception
-    // cannot be caught from Swift, and a crash must not destroy the evidence.
-    var text = r.text
-    if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-        let url = dir.appendingPathComponent("probe-report.txt")
-        try? text.write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    // 8. the privileged install attempt (last, and it may crash) -------------
-    r.section("INSTALL-ATTEMPT")
-    r.add("install-attempt", InstallAttempt.attempt())
     r.add("=== end ===")
-    text = r.text
-    if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-        let url = dir.appendingPathComponent("probe-report.txt")
-        try? text.write(to: url, atomically: true, encoding: .utf8)
-    }
-    return text
+    return r.text
 }
 
 // MARK: - UI
