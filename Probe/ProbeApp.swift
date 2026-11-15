@@ -342,7 +342,7 @@ enum LogProbe {
         var lines: [String] = []
         if #available(iOS 15.0, *) {
             do {
-                let store = try OSLogStore(scope: .currentProcessIdentifier)
+                let store = try OSLogStore(scope: OSLogStore.Scope.currentProcessIdentifier)
                 let entries = Array(store.entries.prefix(4000))
                 lines.append("LOG entries-scanned=\(entries.count)")
                 var hits = 0
@@ -415,7 +415,7 @@ func runHarness() -> String {
         if let plist = try? PropertyListSerialization.propertyList(from: profData, options: [], format: nil),
            let dict = plist as? [String: Any] {
             r.add("profile-keys", dict.keys.sorted().joined(separator: ","))
-            r.add("profile-apple-internal-profile", dict["AppleInternalProfile"] == true ? "true" : "false")
+            r.add("profile-apple-internal-profile", (dict["AppleInternalProfile"] as? Bool) == true ? "true" : "false")
             if let ents = dict["Entitlements"] as? [String: Any] {
                 r.add("profile-entitlements", ents.keys.sorted().joined(separator: ","))
             }
@@ -485,7 +485,6 @@ final class ProbeViewController: UIViewController {
 
         textView.isEditable = false
         textView.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        textView.adjustsFontSizeToFitWidth = false
 
         let stack = UIStackView(arrangedSubviews: [bar, textView])
         stack.axis = .vertical
