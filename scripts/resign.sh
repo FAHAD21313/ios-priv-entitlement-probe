@@ -63,7 +63,9 @@ PRIV_KEYS=(
   com.apple.private.security.no-container
 )
 
+BUNDLE_ID=${BUNDLE_ID:-com.research.ios27.privprobe}
 echo "==> variant $VARIANT"
+echo "    bundle id : $BUNDLE_ID"
 
 # ---------------------------------------------------------------- entitlements
 if [[ "$VARIANT" == "C" ]]; then
@@ -110,7 +112,8 @@ if [[ "$VARIANT" == "A" ]]; then
   cp "$REAL_PROFILE" "$PROFILE_SRC"
   echo "    profile: real (Apple-signed)"
 else
-  ARGS=(--out "$WORK/profile.plist" --team "$TEAM")
+  BUNDLE_ID_ARG=${BUNDLE_ID:-com.research.ios27.privprobe}
+  ARGS=(--out "$WORK/profile.plist" --team "$TEAM" --bundle-id "$BUNDLE_ID_ARG")
   for k in "${PRIV_KEYS[@]}"; do ARGS+=(--entitlement "$k"); done
   ARGS+=(--apple-internal)
   python3 scripts/make_profile.py "${ARGS[@]}"

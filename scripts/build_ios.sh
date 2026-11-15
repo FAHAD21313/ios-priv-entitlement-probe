@@ -15,7 +15,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 TARGET=arm64-apple-ios16.0
 OUT=out
-BUNDLE_ID=com.research.ios27.privprobe
+BUNDLE_ID=${BUNDLE_ID:-com.research.ios27.privprobe}
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Probe.app"

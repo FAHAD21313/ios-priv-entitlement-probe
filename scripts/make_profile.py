@@ -32,6 +32,9 @@ def main() -> int:
                     help="entitlement key to declare (repeatable)")
     ap.add_argument("--team-id", default="")
     ap.add_argument("--bundle-id", default="com.research.ios27.privprobe")
+    ap.add_argument("--app-id", default="", help="App ID pattern; defaults to <team>.* ")
+    ap.add_argument("--dev-cert", default="",
+                    help="DER or PEM of the signing certificate, embedded in DeveloperCertificates")
     ap.add_argument("--apple-internal", action="store_true",
                     help="set AppleInternalProfile = true")
     ap.add_argument("--uuid", default="")
@@ -39,13 +42,37 @@ def main() -> int:
     args = ap.parse_args()
 
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    # The App ID and the identity entitlements have to match the bundle, or
+    # the install is rejected before any of this is interesting.
+    app_id = args.app_id or (f"{args.team_id}.*" if args.team_id else "*")
+
+    entitlements = {k: True for k in args.entitlement}
+    if args.team_id:
+        entitlements.setdefault("application-identifier", f"{args.team_id}.{args.bundle_id}")
+        entitlements.setdefault("keychain-access-groups", [f"{args.team_id}.*"])
+        entitlements.setdefault("com.apple.developer.team-identifier", args.team_id)
+        entitlements.setdefault("get-task-allow", True)
+
+    dev_certs = []
+    if args.dev_cert:
+        raw = open(args.dev_cert, "rb").read()
+        if raw[:1] != b"\x30":                      # PEM -> DER
+            import base64, re as _re
+            body = _re.search(rb"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----",
+                              raw, _re.S)
+            if body:
+                raw = base64.b64decode(_re.sub(rb"\s+", b"", body.group(1)))
+        dev_certs = [raw]
+
     profile = {
         "AppIDName": "Probe",
+        "EntitlementAppID": app_id,
         "ApplicationIdentifierPrefix": [args.team_id] if args.team_id else [],
         "CreationDate": now,
         "Platform": ["iOS"],
-        "DeveloperCertificates": [],
-        "Entitlements": {k: True for k in args.entitlement},
+        "DeveloperCertificates": dev_certs,
+        "Entitlements": entitlements,
         "ExpirationDate": now + datetime.timedelta(days=args.days),
         "Name": "Probe Profile",
         "TeamIdentifier": [args.team_id] if args.team_id else [],
@@ -62,6 +89,7 @@ def main() -> int:
         plistlib.dump(profile, f, fmt=plistlib.FMT_XML)
 
     print(f"wrote {args.out}")
+    print(f"  app-id       : {app_id}")
     print(f"  entitlements : {sorted(profile['Entitlements'])}")
     print(f"  apple-internal: {args.apple_internal}")
     print(f"  uuid         : {profile['UUID']}")

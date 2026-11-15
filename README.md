@@ -32,6 +32,42 @@ binary behind a per-device AEA key). **This app measures the outcome instead.**
 
 ---
 
+## What you need before you can install it
+
+| # | Requirement | Notes |
+|---|---|---|
+| 1 | **The unsigned IPA** | from the CI artifact, or `./scripts/build_ios.sh` |
+| 2 | **An Apple Developer account** | the **free** tier is enough |
+| 3 | **A registered App ID / bundle id** | `com.research.ios27.privprobe` by default — register it in your account, or set `BUNDLE_ID=` to any id you already own |
+| 4 | **A development certificate + provisioning profile** for that bundle id | Xcode, or the Certificates/Identifiers portal |
+| 5 | **Developer Mode enabled** on the device | Settings → Privacy & Security → Developer Mode |
+| 6 | **macOS with the Xcode command line tools** | `codesign` is macOS-only; on Linux use `zsign`/`ldid` instead |
+| 7 | A way to install | Xcode (`xcrun devicectl device install app`), Sideloadly, or AltStore |
+
+**You do not need** a paid account, a jailbreak, or any exploit.
+
+**If you do not have a Mac:** variant **A** (the control) can still be installed
+with Sideloadly/AltStore straight from the IPA, because those sign the app
+themselves. Variants **B** and **C** need the crafted profile and the local
+re-signature, which is `codesign` work — see the Linux path below.
+
+### Linux signing path (no Mac)
+
+```bash
+# craft the profile
+python3 scripts/make_profile.py --out out/profile.plist \
+    --team <TEAMID> --bundle-id <BUNDLE_ID> \
+    --entitlement com.apple.private.mobileinstall.allowedSPI --apple-internal
+
+# wrap it in a CMS container signed with your own identity (needs a .p12)
+openssl smime -sign -in out/profile.plist -signer cert.pem -inkey key.pem \
+    -outform DER -nodetach -binary -out out/embedded.mobileprovision
+
+# sign the app (zsign or ldid)
+zsign -b -f out/embedded.mobileprovision -k out/app.p12 -m out/entitlements.plist \
+      -o out/Probe.app out/Probe.app
+```
+
 ## How to run it
 
 ### 1. Get the unsigned build
