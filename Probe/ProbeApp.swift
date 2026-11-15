@@ -316,15 +316,10 @@ enum Sandbox {
 // build a trust on our own certificate chain and ask the system to evaluate it.
 
 enum TrustProbe {
-    typealias CopySigningInfo = @convention(c) (CFTypeRef, CFOptionFlags, CFDictionary?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
     typealias CreateTrust = @convention(c) (CFTypeRef, CFTypeRef, UnsafeMutablePointer<SecTrust?>) -> Int32
     typealias EvaluateTrust = @convention(c) (CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
     typealias CopyAnchor = @convention(c) (CFTypeRef, UnsafeMutablePointer<SecCertificate?>) -> Int32
 
-    static let copySigningInfo: CopySigningInfo? = {
-        guard let s = DynSec.sym("SecStaticCodeCopySigningInformation") else { return nil }
-        return unsafeBitCast(s, to: CopySigningInfo.self)
-    }()
     static let createTrust: CreateTrust? = {
         guard let s = DynSec.sym("SecTrustCreateWithCertificates") else { return nil }
         return unsafeBitCast(s, to: CreateTrust.self)
@@ -338,22 +333,30 @@ enum TrustProbe {
         return unsafeBitCast(s, to: CopyAnchor.self)
     }()
 
-    /// SHA-256 of a certificate's DER — the precise fingerprint, and it avoids
-    /// every CFString/Swift bridging question.
     static func sha256Of(_ cert: SecCertificate) -> String {
         let d = SecCertificateCopyData(cert) as Data
         return d.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Build a certificate chain from DER blobs (the provisioning profile's
-    /// DeveloperCertificates) and evaluate it.
+    /// Evaluate a certificate chain given as DER blobs (the provisioning
+    /// profile's DeveloperCertificates).  SecStaticCodeCopySigningInformation
+    /// is NOT exported on iOS, so the profile is the only reachable source of
+    /// the chain.
     static func evaluate(derCerts: [Data]) -> [(String, String)] {
         var out: [(String, String)] = []
+        out.append(("symbol-SecTrustCreateWithCertificates", createTrust == nil ? "MISSING" : "present"))
+        out.append(("symbol-SecTrustEvaluateWithError", evaluateTrust == nil ? "MISSING" : "present"))
+        out.append(("symbol-SecTrustCopyAnchor", copyAnchor == nil ? "MISSING" : "present"))
         guard let mkTrust = createTrust, let evaluate = evaluateTrust,
               let mkCert = AnchorSet.createCertFromData else {
             out.append(("trust", "symbols-unavailable"))
             return out
         }
+        guard !derCerts.isEmpty else {
+            out.append(("trust-eval", "no-chain"))
+            return out
+        }
+
         var certsFound: [SecCertificate] = []
         for (i, der) in derCerts.enumerated() {
             var c: SecCertificate?
@@ -364,7 +367,10 @@ enum TrustProbe {
                 out.append(("chain[\(i)]", "create-failed"))
             }
         }
-        guard !certsFound.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
+        guard !certsFound.isEmpty else {
+            out.append(("trust-eval", "no-chain"))
+            return out
+        }
 
         var values: [UnsafeRawPointer?] = certsFound.map { c in
             UnsafeRawPointer(Unmanaged.passUnretained(c).toOpaque())
@@ -385,9 +391,16 @@ enum TrustProbe {
             if let copyAnchor = copyAnchor {
                 var anchor: SecCertificate?
                 if copyAnchor(t, &anchor) == 0, let a = anchor {
-                    out.append(("trust-\(label)-anchor-sha256", sha256Of(a)))
+                    let h = sha256Of(a)
+                    let tag = h.hasPrefix(AnchorSet.publicAppleRootSHA256) ? "  <<< PUBLIC APPLE ROOT CA" : ""
+                    out.append(("trust-\(label)-anchor-sha256", h + tag))
                 } else {
                     out.append(("trust-\(label)-anchor-sha256", "-"))
+                }
+            }
+            if let copyAnchors = AnchorSet.copyTrustAnchors {
+                if let arr = copyAnchors(t) {
+                    for (k, v) in AnchorSet.describe(arr, label: "trust-\(label)-anchors") { out.append((k, v)) }
                 }
             }
         }
