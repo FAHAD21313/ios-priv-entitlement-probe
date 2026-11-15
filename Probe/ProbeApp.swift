@@ -448,13 +448,13 @@ enum AnchorSet {
     }
 
     /// Walk a CFArray of SecCertificate and describe each entry.
-    static func describe(_ arrRef: CFTypeRef?, label: String) -> [String] {
+    static func describe(_ arrRef: CFTypeRef?, label: String) -> [(String, String)] {
         var out: [(String, String)] = []
-        guard let arr = arrRef else {
+        guard let raw = arrRef else {
             out.append((label, "absent"))
             return out
         }
-        let arr = unsafeBitCast(arr as AnyObject, to: CFArray.self)
+        let arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
         let n = CFArrayGetCount(arr)
         out.append(("\(label)-count", String(n)))
         for i in 0..<n {
