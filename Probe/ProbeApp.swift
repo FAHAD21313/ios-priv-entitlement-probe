@@ -340,8 +340,8 @@ enum TrustProbe {
 
     /// SHA-256 of a certificate's DER — the precise fingerprint, and it avoids
     /// every CFString/Swift bridging question.
-    static func certSHA256(_ certRef: CFTypeRef) -> String {
-        let cert = unsafeBitCast(certRef, to: SecCertificate.self)
+    static func certSHA256(_ certPtr: UnsafeRawPointer) -> String {
+        let cert = unsafeBitCast(certPtr, to: SecCertificate.self)
         let cf = SecCertificateCopyData(cert)
         let d = cf as Data
         return d.map { String(format: "%02x", $0) }.joined()
@@ -385,7 +385,7 @@ enum TrustProbe {
         }
         let count = CFArrayGetCount(certs)
         out.append(("chain-count", String(count)))
-        var chainRefs: [CFTypeRef] = []
+        var chainRefs: [UnsafeRawPointer] = []
         for i in 0..<count {
             guard let c = CFArrayGetValueAtIndex(certs, i) else { continue }
             chainRefs.append(c)
@@ -393,8 +393,7 @@ enum TrustProbe {
         }
         guard !chainRefs.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        let rawPtrs: [UnsafeRawPointer] = chainRefs.map { UnsafeRawPointer($0) }
-        let chain = CFArrayCreate(nil, rawPtrs, rawPtrs.count, nil, nil)
+        let chain = CFArrayCreate(nil, chainRefs, chainRefs.count, nil, nil)
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
