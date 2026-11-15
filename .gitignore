@@ -1,0 +1,10 @@
+out/
+build/
+*.ipa
+*.app/
+*.mobileprovision
+*.p12
+*.pem
+*.key
+*.certSigningRequest
+.DS_Store

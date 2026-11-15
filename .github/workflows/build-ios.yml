@@ -1,0 +1,55 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swiftc --version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build the unsigned iOS app
+        run: ./scripts/build_ios.sh
+
+      - name: Show the SDK declarations the probe relies on
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          grep -rn "SecTaskCreateFromSelf" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
+          grep -rn "SecStaticCodeCreateWithPath" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
+          grep -rn "SecRequirementCreateWithString" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
+
+      - name: Package the app bundle as a zip
+        run: |
+          cd out
+          zip -qry Probe-unsigned.app.zip Probe.app
+          ls -la
+
+      - name: Upload the unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Probe-unsigned-ios-ipa
+          path: out/Probe-unsigned.ipa
+
+      - name: Upload the app bundle as a zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Probe-unsigned-ios-app-zip
+          path: out/Probe-unsigned.app.zip
+
+      - name: Upload the profile maker for convenience
+        uses: actions/upload-artifact@v4
+        with:
+          name: scripts
+          path: scripts
