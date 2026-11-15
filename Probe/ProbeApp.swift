@@ -41,8 +41,10 @@ import Darwin
 
 final class ProbeLogger {
     static let shared = ProbeLogger()
-    private let logger = Logger(subsystem: "com.research.ios27.privprobe", category: "probe")
-    func log(_ m: String) { logger.info("\(m, privacy: .public)") }
+    private let osLog = OSLog(subsystem: "com.research.ios27.privprobe", category: "probe")
+    func log(_ m: String) {
+        os_log("%{public}@", log: osLog, type: .info, m as NSString)
+    }
 }
 
 // MARK: - Dynamic Security.framework entry points
@@ -55,7 +57,7 @@ enum DynSec {
     typealias CopyEntitlement = @convention(c) (CFTypeRef, CFString, CFTypeRef?) -> CFTypeRef?
     typealias CreateStaticCode = @convention(c) (CFURL, CFTypeRef?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
     typealias CreateRequirement = @convention(c) (CFString, CFTypeRef?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
-    typealias CheckValidity = @convention(c) (CFTypeRef, CFTypeRef, CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
+    typealias CheckValidity = @convention(c) (CFTypeRef, CFTypeRef?, CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
 
     static let handle: UnsafeMutableRawPointer? = dlopen(
         "/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY)
@@ -93,7 +95,7 @@ final class Report {
     private(set) var lines: [String] = []
     func add(_ s: String) {
         lines.append(s)
-        ProbeLogger.shared.log("\(s, privacy: .public)")
+        ProbeLogger.shared.log(s)
     }
     func add(_ k: String, _ v: String) {
         add("\(k)=\(v)")
