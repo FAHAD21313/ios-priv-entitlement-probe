@@ -617,6 +617,52 @@ enum InstallProbe {
 
 }
 
+// MARK: - Leaf certificate identity
+//
+// Apple encodes the signing identity of a certificate in an extension with OID
+// 1.2.840.113635.100.6.1.x — the last component identifies the class (Apple
+// Development, Apple Distribution, iPhone Distribution, Mac App Store, ...).
+// The DER encoding of the prefix is fixed, so a byte scan is enough; the class
+// byte that follows it is the identifier.
+//
+// Knowing the class tells us which CoreTrust policy bits the chain earns, and
+// matches the CT policy value the kernel logs on the Mac side.
+
+enum LeafIdentity {
+    /// DER: OID 1.2.840.113635.100.6.1  =  06 0a 2a 86 48 86 f7 0d 01 06 01
+    static let oidPrefix = Data([0x06, 0x0a, 0x2a, 0x86, 0x48, 0x86,
+                                 0xf7, 0x0d, 0x01, 0x06, 0x01])
+    /// the same OID, but as a tagged OCTET STRING (inside an extension)
+    static let octetPrefix = Data([0x04, 0x0a, 0x2a, 0x86, 0x48, 0x86,
+                                   0xf7, 0x0d, 0x01, 0x06, 0x01])
+
+    static func classes(in der: Data) -> [Int] {
+        var out: Set<Int> = []
+        for prefix in [oidPrefix, octetPrefix] {
+            var i = der.startIndex
+            while i < der.endIndex {
+                guard let r = der.range(of: prefix, in: i..<der.endIndex) else { break }
+                let after = r.upperBound
+                if after < der.endIndex {
+                    out.insert(Int(der[after]))
+                }
+                i = after
+            }
+        }
+        return out.sorted()
+    }
+
+    static func describe(_ der: Data) -> [(String, String)] {
+        var out: [(String, String)] = []
+        let cs = classes(in: der)
+        out.append(("leaf-oid-class-100.6.1.x",
+                    cs.isEmpty ? "none-found" : cs.map { String($0) }.joined(separator: ",")))
+        out.append(("leaf-cert-sha256", der.map { String(format: "%02x", $0) }.joined()))
+        out.append(("leaf-cert-length", String(der.count)))
+        return out
+    }
+}
+
 // MARK: - Kernel log capture (best effort)
 
 enum LogProbe {
