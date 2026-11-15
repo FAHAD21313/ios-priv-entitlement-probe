@@ -35,6 +35,57 @@ import UIKit
 import Security
 import os
 import ObjectiveC.runtime
+import Darwin
+
+// MARK: - Logging
+
+final class ProbeLogger {
+    static let shared = ProbeLogger()
+    private let logger = Logger(subsystem: "com.research.ios27.privprobe", category: "probe")
+    func log(_ m: String) { logger.log("\(m, privacy: .public)") }
+}
+
+// MARK: - Dynamic Security.framework entry points
+//
+// SecTask, SecStaticCode and SecRequirement are NOT public API on iOS, so they
+// are resolved at run time out of the shipped Security.framework.
+
+enum DynSec {
+    typealias CreateTask = @convention(c) (CFTypeRef?) -> Unmanaged<CFTypeRef>?
+    typealias CopyEntitlement = @convention(c) (CFTypeRef, CFString, CFTypeRef?) -> CFTypeRef?
+    typealias CreateStaticCode = @convention(c) (CFURL, CFTypeRef?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CreateRequirement = @convention(c) (CFString, CFTypeRef?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CheckValidity = @convention(c) (CFTypeRef, CFTypeRef, CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
+
+    static let handle: UnsafeMutableRawPointer? = dlopen(
+        "/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY)
+
+    static func sym(_ name: String) -> UnsafeMutableRawPointer? {
+        guard let handle else { return nil }
+        return dlsym(handle, name)
+    }
+
+    static let createTask: CreateTask? = {
+        guard let s = sym("SecTaskCreateFromSelf") else { return nil }
+        return unsafeBitCast(s, to: CreateTask.self)
+    }()
+    static let copyEntitlement: CopyEntitlement? = {
+        guard let s = sym("SecTaskCopyValueForEntitlement") else { return nil }
+        return unsafeBitCast(s, to: CopyEntitlement.self)
+    }()
+    static let createStaticCode: CreateStaticCode? = {
+        guard let s = sym("SecStaticCodeCreateWithPath") else { return nil }
+        return unsafeBitCast(s, to: CreateStaticCode.self)
+    }()
+    static let createRequirement: CreateRequirement? = {
+        guard let s = sym("SecRequirementCreateWithString") else { return nil }
+        return unsafeBitCast(s, to: CreateRequirement.self)
+    }()
+    static let checkValidity: CheckValidity? = {
+        guard let s = sym("SecStaticCodeCheckValidity") else { return nil }
+        return unsafeBitCast(s, to: CheckValidity.self)
+    }()
+}
 
 // MARK: - Report accumulator
 
@@ -42,7 +93,7 @@ final class Report {
     private(set) var lines: [String] = []
     func add(_ s: String) {
         lines.append(s)
-        os_log("%{public}@", log: Logger(subsystem: "com.research.ios27.privprobe", category: "probe"), type: .info, s as NSString)
+        ProbeLogger.shared.log("\(s, privacy: .public)")
     }
     func add(_ k: String, _ v: String) {
         add("\(k)=\(v)")
@@ -197,8 +248,12 @@ enum Entitlements {
     ]
 
     static func value(_ key: String) -> (present: Bool, description: String) {
-        guard let task = SecTaskCreateFromSelf(nil) else { return (false, "no-task") }
-        guard let v = SecTaskCopyValueForEntitlement(task, key as CFString, nil) else { return (false, "-") }
+        guard let create = DynSec.createTask, let copy = DynSec.copyEntitlement else {
+            return (false, "symbols-unavailable")
+        }
+        guard let taskRef = create(nil) else { return (false, "no-task") }
+        let task = taskRef.takeUnretainedValue()
+        guard let v = copy(task, key as CFString, nil) else { return (false, "-") }
         return (true, describe(v))
     }
 
@@ -249,22 +304,30 @@ enum AnchorProbe {
     /// that root — this succeeds.
     static func run() -> [(String, String)] {
         var out: [(String, String)] = []
-        var sc: SecStaticCode?
-        let cerr = SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &sc)
-        guard cerr == errSecSuccess, let code = sc else {
+        guard let mkCode = DynSec.createStaticCode,
+              let mkReq = DynSec.createRequirement,
+              let check = DynSec.checkValidity else {
+            out.append(("anchor", "symbols-unavailable"))
+            return out
+        }
+        var codeRef: CFTypeRef?
+        let cerr = mkCode(Bundle.main.bundleURL as CFURL, nil, &codeRef)
+        guard cerr == 0, let code = codeRef else {
             out.append(("anchor-apple", "no-staticcode(\(cerr))"))
             return out
         }
-        for req in ["anchor apple", "anchor apple generic", "identifier \"\(Bundle.main.bundleIdentifier)\""] {
-            var reqRef: SecRequirement?
-            let rerr = SecRequirementCreateWithString(req as CFString, [], &reqRef)
-            guard rerr == errSecSuccess, let requirement = reqRef else {
+        out.append(("static-code-created", "ok"))
+        for req in ["anchor apple", "anchor apple generic",
+                    "identifier \"\(Bundle.main.bundleIdentifier)\""] {
+            var reqRef: CFTypeRef?
+            let rerr = mkReq(req as CFString, nil, &reqRef)
+            guard rerr == 0, let requirement = reqRef else {
                 out.append(("req:\(req)", "create-failed(\(rerr))"))
                 continue
             }
             var err: Unmanaged<CFError>?
-            let ok = SecStaticCodeCheckValidity(code, [], requirement, &err)
-            out.append(("req:\(req)", ok ? "SATISFIED" : "NOT-SATISFIED"))
+            let v = check(code, nil, requirement, &err)
+            out.append(("req:\(req)", v == 0 ? "SATISFIED" : "NOT-SATISFIED"))
         }
         return out
     }
