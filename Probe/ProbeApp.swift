@@ -104,6 +104,15 @@ func bitsOf(_ v: UInt64) -> [Int] {
 
 final class Report {
     private(set) var lines: [String] = []
+
+    /// Persist the report after every section: a trap in a later probe must
+    /// not destroy the evidence already collected.
+    func flush() {
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        let url = dir.appendingPathComponent("probe-report.txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
     func add(_ s: String) {
         lines.append(s)
         ProbeLogger.shared.log(s)
@@ -111,7 +120,7 @@ final class Report {
     func add(_ k: String, _ v: String) {
         add("\(k)=\(v)")
     }
-    func section(_ s: String) { lines.append("--- \(s) ---") }
+    func section(_ s: String) { lines.append("--- \(s) ---"); flush() }
     var text: String { lines.joined(separator: "\n") + "\n" }
 }
 
@@ -360,7 +369,14 @@ enum TrustProbe {
         var certsFound: [SecCertificate] = []
         for (i, der) in derCerts.enumerated() {
             var c: SecCertificate?
-            if mkCert(der as CFData, &c) == 0, let cert = c {
+            // CFDataCreate copies the bytes and yields a genuine CF object.
+            // Bridging a Swift Data with `as CFData` does NOT: the result is
+            // not a CFData, and SecCertificateCreateWithData then traps on
+            // "CF objects must have a non-zero isa".
+            let cf = der.withUnsafeBytes { raw -> CFData? in
+                CFDataCreate(nil, raw.baseAddress, der.count, nil, nil)
+            }
+            if let cf = cf, mkCert(cf, &c) == 0, let cert = c {
                 certsFound.append(cert)
                 out.append(("chain[\(i)]-sha256", sha256Of(cert)))
             } else {
