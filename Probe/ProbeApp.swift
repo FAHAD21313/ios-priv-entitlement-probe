@@ -418,6 +418,82 @@ enum TrustProbe {
     }
 }
 
+// MARK: - Runtime anchor enumeration
+//
+// Security.framework exports SecGetAppleTrustAnchors(), which returns the
+// anchor collection the system uses at run time (the "prod" set unless the
+// calling process holds the com.apple.security entitlement, in which case the
+// "all" set including test roots is returned).  That is the direct answer to
+// "does the running iOS trust a chain that ends at the PUBLIC Apple root".
+
+enum AnchorSet {
+    typealias GetAnchors = @convention(c) () -> CFTypeRef?
+    typealias CopyCorporateRoots = @convention(c) () -> CFTypeRef?
+    typealias CopyTrustAnchors = @convention(c) (CFTypeRef) -> CFTypeRef?
+    typealias CreateCertFromData = @convention(c) (CFTypeRef?, UnsafeMutablePointer<SecCertificate?>) -> Int32
+
+    static let getAnchors: GetAnchors? = {
+        guard let s = DynSec.sym("SecGetAppleTrustAnchors") else { return nil }
+        return unsafeBitCast(s, to: GetAnchors.self)
+    }()
+    static let copyCorporateRoots: CopyCorporateRoots? = {
+        guard let s = DynSec.sym("SecCertificateCopyAppleCorporateRoots") else { return nil }
+        return unsafeBitCast(s, to: CopyCorporateRoots.self)
+    }()
+    static let copyTrustAnchors: CopyTrustAnchors? = {
+        guard let s = DynSec.sym("SecTrustCopyAppleAnchors") else { return nil }
+        return unsafeBitCast(s, to: CopyTrustAnchors.self)
+    }()
+    static let createCertFromData: CreateCertFromData? = {
+        guard let s = DynSec.sym("SecCertificateCreateWithData") else { return nil }
+        return unsafeBitCast(s, to: CreateCertFromData.self)
+    }()
+
+    /// SHA-256 of the PUBLIC "Apple Root CA" — the reference fingerprint.
+    static let publicAppleRootSHA256 = "b0b1730ecbc7ff4505142c49"
+
+    static func sha256(_ cert: SecCertificate) -> String {
+        let d = SecCertificateCopyData(cert) as Data
+        return d.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Walk a CFArray of SecCertificate and describe each entry.
+    static func describe(_ arrRef: CFTypeRef?, label: String) -> [String] {
+        var out: [(String, String)] = []
+        guard let arr = arrRef else {
+            out.append((label, "absent"))
+            return out
+        }
+        let arr = unsafeBitCast(arr as AnyObject, to: CFArray.self)
+        let n = CFArrayGetCount(arr)
+        out.append(("\(label)-count", String(n)))
+        for i in 0..<n {
+            guard let p = CFArrayGetValueAtIndex(arr, i) else { continue }
+            let cert = unsafeBitCast(p, to: SecCertificate.self)
+            let h = sha256(cert)
+            let tag = h.hasPrefix(publicAppleRootSHA256) ? "  <<< PUBLIC APPLE ROOT CA" : ""
+            out.append(("\(label)[\(i)]-sha256", h + tag))
+        }
+        return out
+    }
+
+    static func run() -> [(String, String)] {
+        var out: [(String, String)] = []
+        out.append(("symbol-SecGetAppleTrustAnchors", getAnchors == nil ? "MISSING" : "present"))
+        out.append(("symbol-SecCertificateCopyAppleCorporateRoots", copyCorporateRoots == nil ? "MISSING" : "present"))
+        out.append(("symbol-SecTrustCopyAppleAnchors", copyTrustAnchors == nil ? "MISSING" : "present"))
+        out.append(("reference-public-apple-root-sha256", publicAppleRootSHA256))
+
+        if let g = getAnchors {
+            for (k, v) in describe(g(), label: "runtime-anchors") { out.append((k, v)) }
+        }
+        if let c = copyCorporateRoots {
+            for (k, v) in describe(c(), label: "corporate-roots") { out.append((k, v)) }
+        }
+        return out
+    }
+}
+
 // MARK: - Trust-anchor probe (the "anchor apple" clause)
 
 enum AnchorProbe {
@@ -561,6 +637,50 @@ enum LogProbe {
     }
 }
 
+// MARK: - The privileged install attempt
+//
+// The Objective-C type encodings measured on the device give the exact shape
+// of the entry points:
+//
+//   _beginInstallForURL:forPersonaUniqueString:consumeSource:options:progressBlock:completion:
+//       v60@0:8@16@24B32@36@?44@?52
+//       (url, personaUniqueString, BOOL consumeSource, options, progressBlock, completion)
+//
+//   installApplication:options:completion:  v40@0:8@16@24@?32
+//       (appRecord, options, completion)
+//
+// We call the first one because every argument is constructible.  It runs LAST
+// in the harness, after the report has been written to disk, because an
+// Objective-C exception cannot be caught from Swift and would lose the report.
+
+enum InstallAttempt {
+    static func attempt() -> String {
+        guard let cls = NSClassFromString("IXAppInstallCoordinator") else { return "no-class" }
+        let sel = Selector("_beginInstallForURL:forPersonaUniqueString:consumeSource:options:progressBlock:completion:")
+        guard let method = class_getClassMethod(cls, sel) else { return "no-selector" }
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return "no-documents-dir"
+        }
+        let url = URL(fileURLWithPath: docs.appendingPathComponent("probe-install-test.zip").path)
+        var outcome = "no-callback"
+        let progress: @convention(block) (Any?) -> Void = { _ in outcome = "progress" }
+        let completion: @convention(block) (Any?) -> Void = { obj in
+            outcome = "completion=\(String(describing: obj))"
+        }
+        let inv = NSInvocation(method: method)
+        inv.target = cls
+        inv.selector = sel
+        inv.setArgument(url as NSURL, at: 2)
+        inv.setArgument(NSNull(), at: 3)
+        inv.setArgument(NSNumber(value: false), at: 4)
+        inv.setArgument(NSDictionary(), at: 5)
+        inv.setArgument(progress, at: 6)
+        inv.setArgument(completion, at: 7)
+        inv.invoke()
+        return "invoked: \(outcome)"
+    }
+}
+
 // MARK: - Harness
 
 func runHarness() -> String {
@@ -655,6 +775,7 @@ func runHarness() -> String {
     // 5. anchor set -----------------------------------------------------------
     r.section("ANCHOR")
     for (k, v) in AnchorProbe.run() { r.add(k, v) }
+    for (k, v) in AnchorSet.run() { r.add(k, v) }
     for (k, v) in TrustProbe.run() { r.add(k, v) }
 
     // 6. the privileged install channel --------------------------------------
@@ -665,8 +786,26 @@ func runHarness() -> String {
     r.section("KERNEL-LOG")
     for l in LogProbe.run() { r.add(l) }
 
+    r.add("=== end (before the install attempt) ===")
+
+    // Write the report to disk BEFORE the risky call: an Objective-C exception
+    // cannot be caught from Swift, and a crash must not destroy the evidence.
+    var text = r.text
+    if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let url = dir.appendingPathComponent("probe-report.txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    // 8. the privileged install attempt (last, and it may crash) -------------
+    r.section("INSTALL-ATTEMPT")
+    r.add("install-attempt", InstallAttempt.attempt())
     r.add("=== end ===")
-    return r.text
+    text = r.text
+    if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let url = dir.appendingPathComponent("probe-report.txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
+    return text
 }
 
 // MARK: - UI
