@@ -36,6 +36,7 @@ import Security
 import os
 import ObjectiveC.runtime
 import Darwin
+import CryptoKit
 
 // MARK: - Logging
 
@@ -344,7 +345,7 @@ enum TrustProbe {
 
     static func sha256Of(_ cert: SecCertificate) -> String {
         let d = SecCertificateCopyData(cert) as Data
-        return d.map { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Evaluate a certificate chain given as DER blobs (the provisioning
@@ -459,7 +460,7 @@ enum AnchorSet {
 
     static func sha256(_ cert: SecCertificate) -> String {
         let d = SecCertificateCopyData(cert) as Data
-        return d.map { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Walk a CFArray of SecCertificate and describe each entry.
@@ -657,7 +658,8 @@ enum LeafIdentity {
         let cs = classes(in: der)
         out.append(("leaf-oid-class-100.6.1.x",
                     cs.isEmpty ? "none-found" : cs.map { String($0) }.joined(separator: ",")))
-        out.append(("leaf-cert-sha256", der.map { String(format: "%02x", $0) }.joined()))
+        out.append(("leaf-cert-sha256", SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()))
+        out.append(("leaf-cert-der-hex", der.map { String(format: "%02x", $0) }.joined()))
         out.append(("leaf-cert-length", String(der.count)))
         return out
     }
@@ -762,7 +764,7 @@ func runHarness() -> String {
                 profileCerts = ders
                 r.add("profile-developer-certificates", String(ders.count))
                 for (i, d) in ders.enumerated() {
-                    let h = d.map { String(format: "%02x", $0) }.joined()
+                    let h = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
                     let tag = h.hasPrefix(AnchorSet.publicAppleRootSHA256) ? "  <<< PUBLIC APPLE ROOT CA" : ""
                     r.add("profile-cert[\(i)]-sha256", h + tag)
                     for (k, v) in LeafIdentity.describe(d) { r.add("profile-cert[\(i)]-\(k)", v) }
@@ -795,8 +797,11 @@ func runHarness() -> String {
     // 5. anchor set -----------------------------------------------------------
     r.section("ANCHOR")
     for (k, v) in AnchorProbe.run() { r.add(k, v) }
-    for (k, v) in AnchorSet.run() { r.add(k, v) }
+    // The trust evaluation first: it is the safe path and it answers the most.
     for (k, v) in TrustProbe.evaluate(derCerts: profileCerts) { r.add(k, v) }
+    // The system-wide anchor set is read from a raw global pointer, so it is
+    // the one probe that may trap; it therefore runs last.
+    for (k, v) in AnchorSet.run() { r.add(k, v) }
 
     // 6. the privileged install channel --------------------------------------
     r.section("INSTALL")
