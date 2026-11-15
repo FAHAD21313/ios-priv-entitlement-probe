@@ -374,7 +374,7 @@ enum TrustProbe {
             // not a CFData, and SecCertificateCreateWithData then traps on
             // "CF objects must have a non-zero isa".
             let cf = der.withUnsafeBytes { raw -> CFData? in
-                CFDataCreate(nil, raw.baseAddress, der.count, nil, nil)
+                CFDataCreate(nil, raw.baseAddress, CFIndex(der.count))
             }
             if let cf = cf, mkCert(cf, &c) == 0, let cert = c {
                 certsFound.append(cert)
