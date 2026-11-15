@@ -89,6 +89,17 @@ enum DynSec {
     }()
 }
 
+/// The set bit positions of a 64-bit value.
+func bitsOf(_ v: UInt64) -> [Int] {
+    var out: [Int] = []
+    var i = 0
+    while i < 64 {
+        if (v & (UInt64(1) << UInt64(i))) != 0 { out.append(i) }
+        i += 1
+    }
+    return out
+}
+
 // MARK: - Report accumulator
 
 final class Report {
@@ -331,7 +342,7 @@ enum TrustProbe {
     /// every CFString/Swift bridging question.
     static func certSHA256(_ certRef: CFTypeRef) -> String {
         let cert = unsafeBitCast(certRef, to: SecCertificate.self)
-        guard let cf = SecCertificateCopyData(cert) else { return "-" }
+        let cf = SecCertificateCopyData(cert)
         let d = cf as Data
         return d.map { String(format: "%02x", $0) }.joined()
     }
@@ -382,7 +393,8 @@ enum TrustProbe {
         }
         guard !chainRefs.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        let chain = CFArrayCreate(nil, &chainRefs as CFTypeRef, chainRefs.count, nil, nil)
+        let rawPtrs: [UnsafeRawPointer] = chainRefs.map { UnsafeRawPointer($0) }
+        let chain = CFArrayCreate(nil, rawPtrs, rawPtrs.count, nil, nil)
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
@@ -581,11 +593,11 @@ func runHarness() -> String {
         // value intersects a 12-bit mask most of the time.
         let acceptMask: UInt64 = 0x0000_1800_0001_ff80
         r.add("amfi-accept-mask", String(format: "0x%016llx", acceptMask))
-        r.add("amfi-accept-mask-bits",
-              String((0..<64).filter { (acceptMask >> $0) & 1 == 1 }.map { String($0) }.joined(separator: ",")))
+        r.add("amfi-accept-mask-bits", bitsOf(acceptMask).map { String($0) }.joined(separator: ","))
         for c in sig.policyFieldCandidates {
-            let bits = (0..<64).filter { (c.value >> $0) & 1 == 1 }
-            r.add(String(format: "policy-field %@ bits", c.name), bits.isEmpty ? "-" : bits.map(String.init).joined(separator: ",")))
+            let bits = bitsOf(c.value)
+            let joined = bits.map { String($0) }.joined(separator: ",")
+            r.add(String(format: "policy-field %@ bits", c.name), bits.isEmpty ? "-" : joined)
         }
     } else {
         r.add("signature-present", "no")
