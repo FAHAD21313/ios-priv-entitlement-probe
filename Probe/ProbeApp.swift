@@ -395,7 +395,7 @@ enum TrustProbe {
         let chain = certs
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
-                                ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil) as CFTypeRef)] {
+                                ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString))] {
             var trust: SecTrust?
             let terr = mkTrust(chain, policy, &trust)
             guard terr == 0, let t = trust else {
