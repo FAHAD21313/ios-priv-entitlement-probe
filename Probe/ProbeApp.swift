@@ -703,6 +703,7 @@ func runHarness() -> String {
                     let h = d.map { String(format: "%02x", $0) }.joined()
                     let tag = h.hasPrefix(AnchorSet.publicAppleRootSHA256) ? "  <<< PUBLIC APPLE ROOT CA" : ""
                     r.add("profile-cert[\(i)]-sha256", h + tag)
+                    for (k, v) in LeafIdentity.describe(d) { r.add("profile-cert[\(i)]-\(k)", v) }
                 }
             }
             r.add("profile-local-provision", (dict["LocalProvision"] as? Bool).map { $0 ? "true" : "false" } ?? "-")
