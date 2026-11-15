@@ -630,34 +630,52 @@ enum InstallProbe {
 // matches the CT policy value the kernel logs on the Mac side.
 
 enum LeafIdentity {
-    /// DER: OID 1.2.840.113635.100.6.1  =  06 0a 2a 86 48 86 f7 0d 01 06 01
-    static let oidPrefix = Data([0x06, 0x0a, 0x2a, 0x86, 0x48, 0x86,
-                                 0xf7, 0x0d, 0x01, 0x06, 0x01])
-    /// the same OID, but as a tagged OCTET STRING (inside an extension)
-    static let octetPrefix = Data([0x04, 0x0a, 0x2a, 0x86, 0x48, 0x86,
-                                   0xf7, 0x0d, 0x01, 0x06, 0x01])
-
-    static func classes(in der: Data) -> [Int] {
-        var out: Set<Int> = []
-        for prefix in [oidPrefix, octetPrefix] {
-            var i = der.startIndex
-            while i < der.endIndex {
-                guard let r = der.range(of: prefix, in: i..<der.endIndex) else { break }
-                let after = r.upperBound
-                if after < der.endIndex {
-                    out.insert(Int(der[after]))
-                }
-                i = after
+    /// Decode every DER OID in the certificate and report the ones in Apple's
+    /// 1.2.840.113635.100.x space, which is where the signing identity
+    /// class lives.  A fixed byte pattern is not enough: the DER encoding of
+    /// 1.2.840.113635.100.6.1.18.1 is 11 content bytes while
+    /// 1.2.840.113635.100.6.1.9.1 is 10, so a single pattern misses one.
+    static func appleOIDs(in der: Data) -> [String] {
+        var out: [String] = []
+        let bytes = [UInt8](der)
+        var i = 0
+        while i + 2 < bytes.count {
+            guard bytes[i] == 0x06 else { i += 1; continue }
+            var len = Int(bytes[i + 1])
+            var start = i + 2
+            if len & 0x80 != 0 {
+                let n = len & 0x7f
+                guard n > 0, n <= 4, start + n <= bytes.count else { i += 1; continue }
+                len = 0
+                for k in 0..<n { len = (len << 8) | Int(bytes[start + k]) }
+                start += n
             }
+            guard len > 0, len <= 32, start + len <= bytes.count else { i += 1; continue }
+            let content = Array(bytes[start..<(start + len)])
+            // decode the OID content
+            guard let first = content.first else { i += 1; continue }
+            var parts = [String(first / 40), String(first % 40)]
+            var v: UInt64 = 0
+            for b in content.dropFirst() {
+                v = (v << 7) | UInt64(b & 0x7f)
+                if b & 0x80 == 0 {
+                    parts.append(String(v))
+                    v = 0
+                }
+            }
+            let dotted = parts.joined(separator: ".")
+            if dotted.hasPrefix("1.2.840.113635.") { out.append(dotted) }
+            i = start + len
         }
-        return out.sorted()
+        return out
     }
 
     static func describe(_ der: Data) -> [(String, String)] {
         var out: [(String, String)] = []
-        let cs = classes(in: der)
-        out.append(("leaf-oid-class-100.6.1.x",
-                    cs.isEmpty ? "none-found" : cs.map { String($0) }.joined(separator: ",")))
+        let oids = appleOIDs(in: der)
+        out.append(("leaf-apple-oids", oids.isEmpty ? "none" : oids.joined(separator: ",")))
+        let classes = oids.compactMap { $0.hasPrefix("1.2.840.113635.100.6.1.") ? String($0.suffix(1)) : nil }
+        out.append(("leaf-signing-class-100.6.1.x", classes.isEmpty ? "none" : classes.joined(separator: ",")))
         out.append(("leaf-cert-sha256", SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()))
         out.append(("leaf-cert-der-hex", der.map { String(format: "%02x", $0) }.joined()))
         out.append(("leaf-cert-length", String(der.count)))
