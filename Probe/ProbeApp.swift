@@ -345,54 +345,31 @@ enum TrustProbe {
         return d.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func run() -> [(String, String)] {
+    /// Build a certificate chain from DER blobs (the provisioning profile's
+    /// DeveloperCertificates) and evaluate it.
+    static func evaluate(derCerts: [Data]) -> [(String, String)] {
         var out: [(String, String)] = []
-        guard let mkCode = DynSec.createStaticCode,
-              let copyInfo = copySigningInfo,
-              let mkTrust = createTrust,
-              let evaluate = evaluateTrust else {
+        guard let mkTrust = createTrust, let evaluate = evaluateTrust,
+              let mkCert = AnchorSet.createCertFromData else {
             out.append(("trust", "symbols-unavailable"))
             return out
         }
-        var codeRef: CFTypeRef?
-        guard mkCode(Bundle.main.bundleURL as CFURL, nil, &codeRef) == 0, let code = codeRef else {
-            out.append(("trust", "no-staticcode"))
-            return out
-        }
-        var infoRef: CFTypeRef?
-        let ierr = copyInfo(code, 0, nil, &infoRef)
-        guard ierr == 0, let info = infoRef as? [String: Any] else {
-            out.append(("signing-information", "failed(\(ierr))"))
-            return out
-        }
-        out.append(("signing-information", "ok"))
-        out.append(("signing-information-keys", info.keys.sorted().joined(separator: ",")))
-
-        // The certificate chain we are signed with, taken as a raw CFArray.
-        var arr: CFArray? = nil
-        for key in ["kSecCSInfoCertificatesAsArray", "certificates"] {
-            if let raw = info[key] {
-                arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
-                out.append(("chain-key", key))
-                break
-            }
-        }
-        guard let certs = arr else {
-            out.append(("chain", "absent"))
-            return out
-        }
-        let count = CFArrayGetCount(certs)
-        out.append(("chain-count", String(count)))
         var certsFound: [SecCertificate] = []
-        for i in 0..<count {
-            guard let p = CFArrayGetValueAtIndex(certs, i) else { continue }
-            let cert = unsafeBitCast(p, to: SecCertificate.self)
-            certsFound.append(cert)
-            out.append(("chain[\(i)]-sha256", sha256Of(cert)))
+        for (i, der) in derCerts.enumerated() {
+            var c: SecCertificate?
+            if mkCert(der as CFData, &c) == 0, let cert = c {
+                certsFound.append(cert)
+                out.append(("chain[\(i)]-sha256", sha256Of(cert)))
+            } else {
+                out.append(("chain[\(i)]", "create-failed"))
+            }
         }
         guard !certsFound.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        let chain = certs
+        var values: [UnsafeRawPointer?] = certsFound.map { c in
+            UnsafeRawPointer(Unmanaged.passUnretained(c).toOpaque())
+        }
+        let chain = CFArrayCreate(nil, &values, CFIndex(values.count), nil)
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString))] {
@@ -723,6 +700,7 @@ func runHarness() -> String {
 
     // 2. the provisioning profile we shipped ----------------------------------
     r.section("PROFILE")
+    var profileCerts: [Data] = []
     if let profURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
        let profData = try? Data(contentsOf: profURL) {
         r.add("profile-present", "yes")
@@ -750,6 +728,17 @@ func runHarness() -> String {
             if let ents = dict["Entitlements"] as? [String: Any] {
                 r.add("profile-entitlements", ents.keys.sorted().joined(separator: ","))
             }
+            if let ders = dict["DeveloperCertificates"] as? [Data] {
+                profileCerts = ders
+                r.add("profile-developer-certificates", String(ders.count))
+                for (i, d) in ders.enumerated() {
+                    let h = d.map { String(format: "%02x", $0) }.joined()
+                    let tag = h.hasPrefix(AnchorSet.publicAppleRootSHA256) ? "  <<< PUBLIC APPLE ROOT CA" : ""
+                    r.add("profile-cert[\(i)]-sha256", h + tag)
+                }
+            }
+            r.add("profile-local-provision", (dict["LocalProvision"] as? Bool).map { $0 ? "true" : "false" } ?? "-")
+            r.add("profile-is-xcode-managed", (dict["IsXcodeManaged"] as? Bool).map { $0 ? "true" : "false" } ?? "-")
         } else {
             r.add("profile-parsed", "no")
         }
@@ -776,7 +765,7 @@ func runHarness() -> String {
     r.section("ANCHOR")
     for (k, v) in AnchorProbe.run() { r.add(k, v) }
     for (k, v) in AnchorSet.run() { r.add(k, v) }
-    for (k, v) in TrustProbe.run() { r.add(k, v) }
+    for (k, v) in TrustProbe.evaluate(derCerts: profileCerts) { r.add(k, v) }
 
     // 6. the privileged install channel --------------------------------------
     r.section("INSTALL")
