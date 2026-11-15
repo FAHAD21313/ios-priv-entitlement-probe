@@ -317,9 +317,9 @@ enum Sandbox {
 
 enum TrustProbe {
     typealias CopySigningInfo = @convention(c) (CFTypeRef, CFOptionFlags, CFDictionary?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
-    typealias CreateTrust = @convention(c) (CFTypeRef, CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CreateTrust = @convention(c) (CFTypeRef, CFTypeRef, UnsafeMutablePointer<SecTrust?>) -> Int32
     typealias EvaluateTrust = @convention(c) (CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
-    typealias CopyAnchor = @convention(c) (CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CopyAnchor = @convention(c) (CFTypeRef, UnsafeMutablePointer<SecCertificate?>) -> Int32
 
     static let copySigningInfo: CopySigningInfo? = {
         guard let s = DynSec.sym("SecStaticCodeCopySigningInformation") else { return nil }
@@ -340,10 +340,8 @@ enum TrustProbe {
 
     /// SHA-256 of a certificate's DER — the precise fingerprint, and it avoids
     /// every CFString/Swift bridging question.
-    static func certSHA256(_ certPtr: UnsafeRawPointer) -> String {
-        let cert = unsafeBitCast(certPtr, to: SecCertificate.self)
-        let cf = SecCertificateCopyData(cert)
-        let d = cf as Data
+    static func sha256Of(_ cert: SecCertificate) -> String {
+        let d = SecCertificateCopyData(cert) as Data
         return d.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -385,31 +383,35 @@ enum TrustProbe {
         }
         let count = CFArrayGetCount(certs)
         out.append(("chain-count", String(count)))
-        var chainRefs: [UnsafeRawPointer] = []
+        var certsFound: [SecCertificate] = []
         for i in 0..<count {
-            guard let c = CFArrayGetValueAtIndex(certs, i) else { continue }
-            chainRefs.append(c)
-            out.append(("chain[\(i)]-sha256", certSHA256(c)))
+            guard let p = CFArrayGetValueAtIndex(certs, i) else { continue }
+            let cert = unsafeBitCast(p, to: SecCertificate.self)
+            certsFound.append(cert)
+            out.append(("chain[\(i)]-sha256", sha256Of(cert)))
         }
-        guard !chainRefs.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
+        guard !certsFound.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        let chain = CFArrayCreate(nil, chainRefs, chainRefs.count, nil, nil)
+        var values: [UnsafeRawPointer?] = certsFound.map { c in
+            UnsafeRawPointer(Unmanaged.passUnretained(c).toOpaque())
+        }
+        let chain = CFArrayCreate(nil, &values, CFIndex(values.count), nil, nil)
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
-            var trustRef: CFTypeRef?
-            let terr = mkTrust(chain, policy, &trustRef)
-            guard terr == 0, let trust = trustRef else {
+            var trust: SecTrust?
+            let terr = mkTrust(chain, policy, &trust)
+            guard terr == 0, let t = trust else {
                 out.append(("trust-\(label)", "create-failed(\(terr))"))
                 continue
             }
             var err: Unmanaged<CFError>?
-            let v = evaluate(trust, &err)
+            let v = evaluate(t, &err)
             out.append(("trust-\(label)", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
             if let copyAnchor = copyAnchor {
-                var anchorRef: CFTypeRef?
-                if copyAnchor(trust, &anchorRef) == 0, let anchor = anchorRef {
-                    out.append(("trust-\(label)-anchor-sha256", certSHA256(anchor)))
+                var anchor: SecCertificate?
+                if copyAnchor(t, &anchor) == 0, let a = anchor {
+                    out.append(("trust-\(label)-anchor-sha256", sha256Of(a)))
                 } else {
                     out.append(("trust-\(label)-anchor-sha256", "-"))
                 }
