@@ -305,7 +305,7 @@ enum Sandbox {
 // build a trust on our own certificate chain and ask the system to evaluate it.
 
 enum TrustProbe {
-    typealias CopySigningInfo = @convention(c) (CFTypeRef, CFOptionFlags, CFDictionaryRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
+    typealias CopySigningInfo = @convention(c) (CFTypeRef, CFOptionFlags, CFDictionary?, UnsafeMutablePointer<CFTypeRef?>) -> Int32
     typealias CreateTrust = @convention(c) (CFTypeRef, CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
     typealias EvaluateTrust = @convention(c) (CFTypeRef, UnsafeMutablePointer<Unmanaged<CFError>?>) -> Int32
     typealias CopyAnchor = @convention(c) (CFTypeRef, UnsafeMutablePointer<CFTypeRef?>) -> Int32
@@ -326,6 +326,15 @@ enum TrustProbe {
         guard let s = DynSec.sym("SecTrustCopyAnchor") else { return nil }
         return unsafeBitCast(s, to: CopyAnchor.self)
     }()
+
+    /// SHA-256 of a certificate's DER — the precise fingerprint, and it avoids
+    /// every CFString/Swift bridging question.
+    static func certSHA256(_ certRef: CFTypeRef) -> String {
+        let cert = unsafeBitCast(certRef, to: SecCertificate.self)
+        guard let cf = SecCertificateCopyData(cert) else { return "-" }
+        let d = cf as Data
+        return d.map { String(format: "%02x", $0) }.joined()
+    }
 
     static func run() -> [(String, String)] {
         var out: [(String, String)] = []
@@ -350,25 +359,35 @@ enum TrustProbe {
         out.append(("signing-information", "ok"))
         out.append(("signing-information-keys", info.keys.sorted().joined(separator: ",")))
 
-        // The certificate chain we are signed with.
-        var chain: [Any] = []
+        // The certificate chain we are signed with, taken as a raw CFArray.
+        var arr: CFArray? = nil
         for key in ["kSecCSInfoCertificatesAsArray", "certificates"] {
-            if let v = info[key] as? [Any] { chain = v; out.append(("chain-key", key)); break }
-        }
-        out.append(("chain-count", String(chain.count)))
-        for (i, c) in chain.enumerated() {
-            if let cert = c as? SecCertificate {
-                let sub = SecCertificateCopySubjectSummary(cert) as String? ?? "-"
-                out.append(("chain[\(i)]-subject", sub))
+            if let raw = info[key] {
+                arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
+                out.append(("chain-key", key))
+                break
             }
         }
+        guard let certs = arr else {
+            out.append(("chain", "absent"))
+            return out
+        }
+        let count = CFArrayGetCount(certs)
+        out.append(("chain-count", String(count)))
+        var chainRefs: [CFTypeRef] = []
+        for i in 0..<count {
+            guard let c = CFArrayGetValueAtIndex(certs, i) else { continue }
+            chainRefs.append(c)
+            out.append(("chain[\(i)]-sha256", certSHA256(c)))
+        }
+        guard !chainRefs.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        // Ask the system to evaluate that chain.
-        guard !chain.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
+        let chain = CFArrayCreate(nil, &chainRefs as CFTypeRef, chainRefs.count, nil, nil)
+
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
                                 ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
             var trustRef: CFTypeRef?
-            let terr = mkTrust(chain as CFArray, policy, &trustRef)
+            let terr = mkTrust(chain, policy, &trustRef)
             guard terr == 0, let trust = trustRef else {
                 out.append(("trust-\(label)", "create-failed(\(terr))"))
                 continue
@@ -378,13 +397,10 @@ enum TrustProbe {
             out.append(("trust-\(label)", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
             if let copyAnchor = copyAnchor {
                 var anchorRef: CFTypeRef?
-                if copyAnchor(trust, &anchorRef) == 0, let anchor = anchorRef as? SecCertificate {
-                    let sub = SecCertificateCopySubjectSummary(anchor) as String? ?? "-"
-                    out.append(("trust-\(label)-anchor", sub))
-                    if let d = SecCertificateCopyData(anchor) as Data? {
-                        out.append(("trust-\(label)-anchor-sha256",
-                                    d.map { String(format: "%02x", $0) }.joined().description))
-                    }
+                if copyAnchor(trust, &anchorRef) == 0, let anchor = anchorRef {
+                    out.append(("trust-\(label)-anchor-sha256", certSHA256(anchor)))
+                } else {
+                    out.append(("trust-\(label)-anchor-sha256", "-"))
                 }
             }
         }
@@ -559,12 +575,17 @@ func runHarness() -> String {
         for c in sig.policyFieldCandidates {
             r.add(String(format: "policy-field %@", c.name), String(format: "0x%016llx", c.value))
         }
-        // Which of the candidate offsets actually intersects the accepted mask?
+        // The accept mask AMFI applies.  We report the raw bits of each
+        // candidate so the arithmetic is done by the reader: an "intersects"
+        // flag would be a false-positive generator, because a random 64-bit
+        // value intersects a 12-bit mask most of the time.
         let acceptMask: UInt64 = 0x0000_1800_0001_ff80
+        r.add("amfi-accept-mask", String(format: "0x%016llx", acceptMask))
+        r.add("amfi-accept-mask-bits",
+              String((0..<64).filter { (acceptMask >> $0) & 1 == 1 }.map { String($0) }.joined(separator: ",")))
         for c in sig.policyFieldCandidates {
-            if c.value & acceptMask != 0 {
-                r.add(String(format: "policy-field %@ intersects-accept-mask", c.name), "YES")
-            }
+            let bits = (0..<64).filter { (c.value >> $0) & 1 == 1 }
+            r.add(String(format: "policy-field %@ bits", c.name), bits.isEmpty ? "-" : bits.map(String.init).joined(separator: ",")))
         }
     } else {
         r.add("signature-present", "no")
