@@ -392,13 +392,10 @@ enum TrustProbe {
         }
         guard !certsFound.isEmpty else { out.append(("trust-eval", "no-chain")); return out }
 
-        var values: [UnsafeRawPointer?] = certsFound.map { c in
-            UnsafeRawPointer(Unmanaged.passUnretained(c).toOpaque())
-        }
-        let chain = CFArrayCreate(nil, &values, CFIndex(values.count), nil, nil)
+        let chain = certs
 
         for (label, policy) in [("basic-x509", SecPolicyCreateBasicX509()),
-                                ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil))] {
+                                ("ssl", SecPolicyCreateSSL(true, "apple.com" as CFString, nil) as CFTypeRef)] {
             var trust: SecTrust?
             let terr = mkTrust(chain, policy, &trust)
             guard terr == 0, let t = trust else {
