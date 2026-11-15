@@ -42,7 +42,7 @@ import Darwin
 final class ProbeLogger {
     static let shared = ProbeLogger()
     private let logger = Logger(subsystem: "com.research.ios27.privprobe", category: "probe")
-    func log(_ m: String) { logger.log("\(m, privacy: .public)") }
+    func log(_ m: String) { logger.info("\(m, privacy: .public)") }
 }
 
 // MARK: - Dynamic Security.framework entry points
@@ -402,28 +402,17 @@ enum LogProbe {
     ]
 
     static func run() -> [String] {
-        var lines: [String] = []
-        if #available(iOS 15.0, *) {
-            do {
-                let store = try OSLogStore(scope: OSLogStore.Scope.currentProcessIdentifier)
-                let entries = Array(store.entries.prefix(4000))
-                lines.append("LOG entries-scanned=\(entries.count)")
-                var hits = 0
-                for e in entries {
-                    let msg = e.composedMessage
-                    if markers.contains(where: { msg.contains($0) }) {
-                        hits += 1
-                        lines.append("LOG hit: [\(e.subsystem)] \(msg)")
-                    }
-                }
-                lines.append("LOG marker-hits=\(hits)")
-            } catch {
-                lines.append("LOG error=\(error.localizedDescription)")
-            }
-        } else {
-            lines.append("LOG unavailable-ios-version")
-        }
-        return lines
+        // The unified log is not readable by a sandboxed app (OSLogStore is not
+        // exposed to iOS), so the kernel's own AMFI lines cannot be captured
+        // from inside the app.  Everything the probe logs about itself goes to
+        // the unified log under this subsystem, so the kernel's lines for this
+        // process can be picked up from a Mac with the command below.
+        return [
+            "LOG capture=app-side-unavailable",
+            "LOG self-subsystem=com.research.ios27.privprobe",
+            "LOG mac-command=log show --last 10m --predicate 'process == \"Probe\" OR eventMessage CONTAINS[c] \"AMFI\"'",
+            "LOG markers=\(markers.joined(separator: ","))",
+        ]
     }
 }
 
