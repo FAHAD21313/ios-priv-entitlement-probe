@@ -607,7 +607,6 @@ enum MachO {
         var out: [String: String] = [:]
         let b = [UInt8](d)
         guard b.count > 12, readU32BE(b, 0) == 0xfade7171 else { return out }
-        let length = Int(readU32BE(b, 4))
         let count = Int(readU32BE(b, 8))
         guard count > 0, count < 4096 else { return out }
         for i in 0..<count {
@@ -805,12 +804,14 @@ enum Mis {
         var out: [Fact] = []
         guard let f = copyErrorString else { return out }
         var found = 0
-        for code in stride(from: Int32(0xe800_8000), through: Int32(0xe800_80ff), by: 1) {
-            guard let s = f(code) else { continue }
+        for code in stride(from: UInt32(0xe800_8000), through: UInt32(0xe800_80ff), by: 1) {
+            // MISError is a 32-bit code whose top bits are set, so it has to
+            // travel as a bit pattern.
+            guard let s = f(Int32(bitPattern: code)) else { continue }
             let ns = s as! NSString
             let text = ns as String
             if text.isEmpty || text.lowercased().contains("unknown error") { continue }
-            out.append(Fact(String(format: "mis-error 0x%08x", UInt32(bitPattern: code)), text))
+            out.append(Fact(String(format: "mis-error 0x%08x", code), text))
             found += 1
             if found > 64 { break }
         }
@@ -1445,7 +1446,6 @@ func evaluate(_ f: Facts) -> [Verdict] {
 
     // T03 — the signer cannot write the CT-policy field: the policy the chain
     //        earns appears NOWHERE in the signed material.
-    let onDisk = f.signature.policyFieldCandidates.first.map { $0.value } ?? 0
     let appears = f.signature.policyFieldCandidates.contains { $0.value == f.predictedPolicy }
     v.append(Verdict(id: "T03",
                       title: "the CT-policy field is not signer-controlled (the predicted policy is absent from the signature)",
