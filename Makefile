@@ -38,6 +38,10 @@ profile:
 identities:
 	python3 scripts/identity_classes.py
 
+cert-class:
+	@test -n "$(f)" || (echo "usage: make cert-class f=Profile.mobileprovision" && exit 2)
+	python3 scripts/cert_class.py "$(f)"
+
 collect:
 	./scripts/collect.sh
 
