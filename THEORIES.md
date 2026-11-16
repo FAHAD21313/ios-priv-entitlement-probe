@@ -254,6 +254,24 @@ entitlement became an honoured one.
 
 ---
 
+## T15 — dyld4 indexes a `malloc(count)` array with `ref & 0x7fff`
+
+*Claim:* dyld4's Prebuilt Loader validation reads and writes a validation
+array at index `loader->ref & 0x7fff` (0..32767) without comparing the index
+to `count`, so any closure with a large Ref causes an OOB access.
+
+*Decided by:* reading the app's OWN real closure file
+(`$HOME/Library/Caches/com.apple.dyld/<arch>.dyld4`) — magic `0x73703464`,
+version hash `0x9593b355`, `count` at +0xc, loader-offset array at +0x10,
+each loader's `Ref` u16 at +0x6. `CONFIRMED` when any
+`ref & 0x7fff >= count`.
+
+*Refuted if:* every loader's masked ref is below count.
+
+*The PoC button* patches one Ref to `0xffff`, spawns a child of the same
+executable (which re-runs the probe on the crafted closure), then restores the
+original file. It is opt-in and never runs automatically.
+
 ## What the probe does NOT decide
 
 * Whether `amfid` or `misagent` accept a crafted profile. Both are

