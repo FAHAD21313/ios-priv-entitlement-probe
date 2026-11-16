@@ -69,6 +69,10 @@ enum Bits {
         let b = of(v)
         return b.isEmpty ? "-" : b.map { String($0) }.joined(separator: ",")
     }
+    /// The same, for a list of bit numbers.
+    static func list(_ bits: [Int]) -> String {
+        bits.isEmpty ? "-" : bits.map { String($0) }.joined(separator: ",")
+    }
     static func hex(_ v: UInt64) -> String { String(format: "0x%016llx", v) }
 }
 
