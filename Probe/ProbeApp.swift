@@ -435,6 +435,8 @@ struct EmbeddedSignature {
     var policyFieldCandidates: [(name: String, offset: Int, value: UInt64)] = []
     var cmsBlob: Data? = nil
     var entitlementsSlotPresent: Bool = false
+    var entitlementsNote: String = ""
+    var entitlementsHex: String = ""
     var adhoc: Bool = false
 }
 
@@ -554,12 +556,16 @@ enum MachO {
             sig.entitlementsSlotPresent = true
             let e = sb + eSlot.offset
             let blob = Data(bytes[e..<min(e + 4096, bytes.count)])
+            let parsed = parseEntitlementsBlob(blob)
+            sig.entitlementsNote = parsed.note
+            sig.entitlementsHex = bytes[e..<min(e + 64, bytes.count)]
+                .map { String(format: "%02x", $0) }.joined()
             sig.slices.append(SliceInfo(index: index,
                                         identifier: sig.identifier,
                                         teamID: sig.teamID,
                                         codeDirectoryVersion: sig.codeDirectoryVersion,
                                         execSegFlags: sig.execSegFlags,
-                                        claimedEntitlements: parseEntitlementsBlob(blob)))
+                                        claimedEntitlements: parsed.dict))
         }
 
         // The CMS blob (slot 0x10000) — the real signed material.
@@ -603,23 +609,50 @@ enum MachO {
     /// Reading the count from the wrong place silently yields zero claimed
     /// entitlements, which is exactly how the first full run reported
     /// `claimed-count=0` while the signature clearly had an entitlements slot.
-    static func parseEntitlementsBlob(_ d: Data) -> [String: String] {
-        var out: [String: String] = [:]
+    static func parseEntitlementsBlob(_ d: Data) -> (dict: [String: String], note: String) {
         let b = [UInt8](d)
-        guard b.count > 12, readU32BE(b, 0) == 0xfade7171 else { return out }
-        let count = Int(readU32BE(b, 8))
-        guard count > 0, count < 4096 else { return out }
-        for i in 0..<count {
-            let e = 12 + i * 8
-            guard e + 8 <= b.count else { break }
-            let keyOff = Int(readU32BE(b, e))
-            let valOff = Int(readU32BE(b, e + 4))
-            guard keyOff < b.count, valOff < b.count else { continue }
-            let key = readCString(b, keyOff)
-            let val = readCString(b, valOff)
-            if !key.isEmpty { out[key] = val.isEmpty ? "true" : val }
+        guard b.count > 12 else { return ([:], "blob too short") }
+
+        // The magic may be preceded by a BlobWrapper header, so look for it
+        // instead of assuming it sits at offset 0.
+        var magicAt = -1
+        for i in 0..<min(64, b.count - 4) where readU32BE(b, i) == 0xfade7171 {
+            magicAt = i
+            break
         }
-        return out
+        guard magicAt >= 0 else {
+            return ([:], "no 0xfade7171 magic in the first 64 bytes; head=" +
+                    b.prefix(16).map { String(format: "%02x", $0) }.joined())
+        }
+
+        let count = Int(readU32BE(b, magicAt + 8))
+        guard count > 0, count < 4096 else {
+            return ([:], "magic at \(magicAt), count=\(count)")
+        }
+
+        // The key/value offsets are relative either to the blob's own start or
+        // to the slot's start; try both and keep the one that yields printable
+        // keys.  (Guessing here has already cost two runs.)
+        var best: [String: String] = [:]
+        var bestBase = 0
+        for base in [magicAt, 0] {
+            var out: [String: String] = [:]
+            for i in 0..<count {
+                let e = magicAt + 12 + i * 8
+                guard e + 8 <= b.count else { break }
+                let keyOff = Int(readU32BE(b, e))
+                let valOff = Int(readU32BE(b, e + 4))
+                let ki = base + keyOff, vi = base + valOff
+                guard ki >= 0, ki < b.count, vi >= 0, vi < b.count else { continue }
+                let key = readCString(b, ki)
+                let val = readCString(b, vi)
+                guard !key.isEmpty, key.allSatisfy({ $0.isASCII && $0 >= 0x20 && $0 < 0x7f }) else { continue }
+                out[key] = val.isEmpty ? "true" : val
+            }
+            if out.count > best.count { best = out; bestBase = base }
+        }
+        let note = "magic-at=\(magicAt) count=\(count) base=\(bestBase) parsed=\(best.count)"
+        return (best, note)
     }
 
     /// Read the whole signature of a file (thin or fat).
@@ -1208,6 +1241,21 @@ func runHarness(r: Report) -> Facts {
     r.add("exec-seg-flags-bits", Bits.list(sig.execSegFlags))
     r.add("superblob-slots", sig.slots.map { String(format: "0x%x", $0.type) }.joined(separator: ","))
     r.add("entitlements-slot-present", sig.entitlementsSlotPresent ? "yes" : "no")
+    r.add("entitlements-blob-note", sig.entitlementsNote.isEmpty ? "-" : sig.entitlementsNote)
+    let bytes0 = [UInt8](FileManager.default.contents(atPath: execPath) ?? Data())
+    let sb0 = sig.superBlobOffset
+    r.add("entitlements-blob-head-hex", sig.entitlementsHex.isEmpty ? "-" : sig.entitlementsHex)
+    // the whole slot table, with each blob's magic and length, so a format
+    // question is answered by the bytes instead of by another guess
+    for sl in sig.slots {
+        let o = sb0 + sl.offset
+        guard o + 8 <= bytes0.count else { continue }
+        let magic = MachO.readU32BE(bytes0, o)
+        let len = MachO.readU32BE(bytes0, o + 4)
+        r.add(String(format: "slot 0x%04x", sl.type),
+              String(format: "off=0x%x magic=0x%08x len=%d head=%@", sl.offset, magic, len,
+                     bytes0[o..<min(o + 16, bytes0.count)].map { String(format: "%02x", $0) }.joined()))
+    }
     for s in slices {
         r.add("slice[\(s.index)]", "cpu=0x\(String(s.cputype, radix: 16)) subtype=0x\(String(s.cpusubtype, radix: 16)) id=\(s.identifier) cd=0x\(String(s.codeDirectoryVersion, radix: 16)) execSegFlags=\(Bits.hex(s.execSegFlags))")
         r.add("slice[\(s.index)]-claimed-entitlements", s.claimedEntitlements.isEmpty ? "-" : s.claimedEntitlements.keys.sorted().joined(separator: ","))
