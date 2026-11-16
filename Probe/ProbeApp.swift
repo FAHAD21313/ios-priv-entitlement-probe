@@ -1795,7 +1795,9 @@ func evaluate(_ f: Facts) -> [Verdict] {
                       evidence: "write-outside-container=\(outside) private-honoured=\(privateHonoured ? "YES" : "no")"))
 
     // T15 — dyld4 closure OOB observed in this process's own closure
-    let oobCount = f.dyld4Findings.reduce(0) { $0 + $1.loaders.filter { $2.oob }.count }
+    let oobCount = f.dyld4Findings.reduce(0) { total, finding in
+        total + finding.loaders.filter { $0.oob }.count
+    }
     v.append(Verdict(id: "T15",
                       title: "dyld4 indexes a malloc(count) array with ref & 0x7fff without a bounds check",
                       state: oobCount > 0 ? "CONFIRMED" : "INCONCLUSIVE",
