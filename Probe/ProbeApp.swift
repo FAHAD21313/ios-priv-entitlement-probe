@@ -165,15 +165,51 @@ enum CTPolicy {
         return (b, matched)
     }
 
-    /// The policy is the AND across every certificate of the chain.
+    /// What each certificate of the chain contributes.
+    static func contributions(chain: [[String]]) -> [UInt64] {
+        chain.map { bits(forOIDs: $0).bits }
+    }
+
+    /// The policy is the AND across the certificates that actually carry an
+    /// Apple signing class.
+    ///
+    /// A certificate with **no** class — the anchor at the top of the chain —
+    /// contributes the identity, not zero.  The device says so: our chain is
+    /// leaf {7} -> intermediate {4,6,7,12..17,37,38,43,44,46} -> public root
+    /// {}, and a strict AND over all three is **zero**, i.e. no chain could
+    /// ever clear the gate.  The root must not participate.
     static func policy(chain: [[String]]) -> UInt64 {
-        guard !chain.isEmpty else { return 0 }
-        var acc = UInt64.max
-        for oids in chain {
-            let b = bits(forOIDs: oids).bits
-            acc &= b
-        }
-        return acc
+        let c = contributions(chain: chain).filter { $0 != 0 }
+        guard !c.isEmpty else { return 0 }
+        return c.reduce(UInt64.max) { $0 & $1 }
+    }
+
+    /// The same AND with every certificate participating.  Reported for
+    /// comparison: the difference between the two is the finding.
+    static func strictPolicy(chain: [[String]]) -> UInt64 {
+        let c = contributions(chain: chain)
+        guard !c.isEmpty else { return 0 }
+        return c.reduce(UInt64.max) { $0 & $1 }
+    }
+
+    /// What the policy would be if certificate `index` carried a different
+    /// Apple class.  This is what turns the probe into a map of the target:
+    /// it says exactly which certificate class is needed for which path.
+    static func whatIf(chain: [[String]], index: Int, classOID: String) -> UInt64 {
+        var c = contributions(chain: chain)
+        guard index >= 0, index < c.count else { return 0 }
+        c[index] = mask(for: oidBitNumbers[classOID] ?? [])
+        let nz = c.filter { $0 != 0 }
+        guard !nz.isEmpty else { return 0 }
+        return nz.reduce(UInt64.max) { $0 & $1 }
+    }
+
+    /// Every Apple class the table knows, so the report can show what each of
+    /// them would yield.
+    static var knownClasses: [String] {
+        oidBitNumbers.keys.filter { $0.hasPrefix("1.2.840.113635.100.6.1.") }
+            .filter { !$0.contains(".1.") || $0.split(separator: ".").count <= 8 }
+            .sorted()
     }
 }
 
@@ -550,17 +586,32 @@ enum MachO {
     }
 
     /// Parse a `0xfade7171` entitlements blob into a dictionary.
+    ///
+    /// The layout is:
+    ///     uint32 magic  = 0xfade7171
+    ///     uint32 length            (of the whole blob)
+    ///     uint32 count
+    ///     count * (uint32 keyOffset, uint32 valueOffset)   -- relative to the
+    ///                                                          blob's start
+    ///     the key/value strings
+    ///
+    /// The count is at offset **8**, not 4: offset 4 is the blob's length.
+    /// Reading the count from the wrong place silently yields zero claimed
+    /// entitlements, which is exactly how the first full run reported
+    /// `claimed-count=0` while the signature clearly had an entitlements slot.
     static func parseEntitlementsBlob(_ d: Data) -> [String: String] {
         var out: [String: String] = [:]
         let b = [UInt8](d)
-        guard b.count > 8, readU32BE(b, 0) == 0xfade7171 else { return out }
-        let count = Int(readU32BE(b, 4))
+        guard b.count > 12, readU32BE(b, 0) == 0xfade7171 else { return out }
+        let length = Int(readU32BE(b, 4))
+        let count = Int(readU32BE(b, 8))
         guard count > 0, count < 4096 else { return out }
         for i in 0..<count {
-            let e = 8 + i * 8
+            let e = 12 + i * 8
             guard e + 8 <= b.count else { break }
             let keyOff = Int(readU32BE(b, e))
             let valOff = Int(readU32BE(b, e + 4))
+            guard keyOff < b.count, valOff < b.count else { continue }
             let key = readCString(b, keyOff)
             let val = readCString(b, valOff)
             if !key.isEmpty { out[key] = val.isEmpty ? "true" : val }
@@ -742,6 +793,25 @@ enum Mis {
         }
         let ns = s as! NSString
         return ns as String
+    }
+
+    /// Dump the error-code -> text table around the MISError space.  The
+    /// probe then decodes its own error codes instead of us guessing.
+    static func errorTable() -> [Fact] {
+        var out: [Fact] = []
+        guard let f = copyErrorString else { return out }
+        var found = 0
+        for code in stride(from: Int32(0xe800_8000), through: Int32(0xe800_80ff), by: 1) {
+            guard let s = f(code) else { continue }
+            let ns = s as! NSString
+            let text = ns as String
+            if text.isEmpty || text.lowercased().contains("unknown error") { continue }
+            out.append(Fact(String(format: "mis-error 0x%08x", UInt32(bitPattern: code)), text))
+            found += 1
+            if found > 64 { break }
+        }
+        if out.isEmpty { out.append(Fact("mis-error-table", "empty")) }
+        return out
     }
 
     /// Run the launch-time validator against the running executable.
@@ -1058,6 +1128,10 @@ final class Facts {
     var claimed: [String: String] = [:]
     var perCertBits: [(String, UInt64, [String])] = []
     var predictedPolicy: UInt64 = 0
+    var strictPolicy: UInt64 = 0
+    var chainRootSHA256: String = ""
+    var chainRootIsPublicAppleRoot = false
+    var trustResult = "-"
     var mis: [Fact] = []
     var misProfile: [Fact] = []
     var anchors: [Fact] = []
@@ -1199,7 +1273,10 @@ func runHarness(r: Report) -> Facts {
             r.add("profile-developer-certificates", String(ders.count))
             for (i, d) in ders.enumerated() {
                 let oids = DER.appleOIDs(in: d)
-                chainOIDs.append(oids)
+                // NOT appended to chainOIDs: the profile's DeveloperCertificates
+                // are the certificates the profile authorises, not the chain
+                // the kernel verifies.  The policy is computed from the
+                // certificates inside the binary's own CMS blob.
                 let b = CTPolicy.bits(forOIDs: oids)
                 f.perCertBits.append(("profile-cert[\(i)]", b.bits, b.matched))
                 r.add("profile-cert[\(i)]-sha256", B64.sha256(d))
@@ -1215,20 +1292,52 @@ func runHarness(r: Report) -> Facts {
         }
     }
 
-    // The predicted CT policy: the AND across every certificate we found.
+    // The predicted CT policy.  The chain that matters is the one the kernel
+    // sees: the certificates inside the binary's own CMS blob.  The profile's
+    // DeveloperCertificates are a *different* list (the certificates the
+    // profile authorises) and are reported, but they are not ANDed in.
     if !chainOIDs.isEmpty {
         f.predictedPolicy = CTPolicy.policy(chain: chainOIDs)
+        f.strictPolicy = CTPolicy.strictPolicy(chain: chainOIDs)
     }
     r.add("predicted-ct-policy", Bits.hex(f.predictedPolicy))
     r.add("predicted-ct-policy-bits", Bits.list(f.predictedPolicy))
+    r.add("predicted-ct-policy-strict-all-certs", Bits.hex(f.strictPolicy))
     r.add("predicted-ct-policy-in-accept-mask", (f.predictedPolicy & CTPolicy.acceptMask) != 0 ? "YES" : "no")
     r.add("predicted-ct-policy-has-fastpath-bit", (f.predictedPolicy & CTPolicy.fastPathMask) != 0 ? "YES" : "no")
     r.add("predicted-ct-policy-has-internal-profile-bit", (f.predictedPolicy & CTPolicy.internalProfileMask) != 0 ? "YES" : "no")
+
+    // The anchor of the chain, and whether it is the PUBLIC Apple Root CA.
+    if let root = f.chainCerts.last {
+        let h = B64.sha256(root)
+        f.chainRootSHA256 = h
+        let isPublic = h.hasPrefix(AnchorSet.publicAppleRootSHA256)
+        f.chainRootIsPublicAppleRoot = isPublic
+        r.add("chain-root-sha256", h)
+        r.add("chain-root-is-public-apple-root", isPublic ? "YES" : "no")
+    } else {
+        r.add("chain-root-sha256", "-")
+        r.add("chain-root-is-public-apple-root", "no-chain")
+    }
+
+    // WHAT-IF: which leaf class would produce which path.  This is the map
+    // of the target: it says exactly which certificate the experiment needs.
+    r.section("WHAT-IF (leaf class -> policy -> path)")
+    let leafIndex = chainOIDs.isEmpty ? -1 : 0
+    for cls in CTPolicy.knownClasses {
+        guard let bits = CTPolicy.oidBitNumbers[cls] else { continue }
+        let pol = leafIndex >= 0 ? CTPolicy.whatIf(chain: chainOIDs, index: leafIndex, classOID: cls) : 0
+        let inMask = (pol & CTPolicy.acceptMask) != 0
+        let fast = (pol & CTPolicy.fastPathMask) != 0
+        let path = fast ? "app-store-fast-path" : (inMask ? "accepted-mask-only" : "rejected")
+        r.add("WHAT-IF leaf=\(cls)", "bits=\(Bits.list(bits)) policy=\(Bits.hex(pol)) in-mask=\(inMask ? "YES" : "no") fastpath=\(fast ? "YES" : "no") path=\(path)")
+    }
 
     // 4. LIBMIS ----------------------------------------------------------------
     r.section("LIBMIS")
     f.mis = Mis.run()
     for fct in f.mis { r.add(fct.key, fct.value) }
+    for fct in Mis.errorTable() { r.add(fct.key, fct.value) }
     f.misProfile = Mis.validateOwnProfile(f.profileData)
     for fct in f.misProfile { r.add(fct.key, fct.value) }
 
@@ -1271,7 +1380,10 @@ func runHarness(r: Report) -> Facts {
     f.runtimeAnchorHasPublicRoot = (runtimeFlag?.value == "YES")
     let corporateFlag = f.anchors.first(where: { $0.key == "corporate-roots-contains-public-apple-root" })
     f.anchorHasPublicRoot = (corporateFlag?.value == "YES")
-    for fct in TrustProbe.evaluate(derCerts: f.profileCerts) { r.add(fct.key, fct.value) }
+    for fct in TrustProbe.evaluate(derCerts: f.profileCerts) {
+        r.add(fct.key, fct.value)
+        if fct.key == "trust-basic-x509" { f.trustResult = fct.value }
+    }
 
     // 9. INSTALL ---------------------------------------------------------------
     r.section("INSTALL")
@@ -1309,12 +1421,15 @@ func runHarness(r: Report) -> Facts {
 func evaluate(_ f: Facts) -> [Verdict] {
     var v: [Verdict] = []
 
-    // T01 — the runtime anchor set contains the PUBLIC Apple Root CA.
+    // T01 — the chain the running system trusts terminates at the PUBLIC
+    // Apple Root CA.  This is the strong form of the claim: it is about the
+    // chain the kernel actually accepted, not about an anchor list we may or
+    // may not be able to enumerate from userland.
+    let trustVerdict = f.trustResult
     v.append(Verdict(id: "T01",
-                      title: "the runtime trust-anchor set contains the PUBLIC Apple Root CA",
-                      state: f.runtimeAnchorHasPublicRoot ? "CONFIRMED" : (f.anchorHasPublicRoot ? "CONFIRMED" : "REFUTED"),
-                      evidence: f.runtimeAnchorHasPublicRoot ? "runtime-anchors-contains-public-apple-root=YES"
-                               : (f.anchorHasPublicRoot ? "corporate-roots-contains-public-apple-root=YES" : "neither anchor list contains it")))
+                      title: "the chain the system trusts terminates at the PUBLIC Apple Root CA",
+                      state: f.chainRootIsPublicAppleRoot ? "CONFIRMED" : "INCONCLUSIVE",
+                      evidence: "chain-root=\(f.chainRootSHA256.prefix(16))... public-root=\(f.chainRootIsPublicAppleRoot ? "YES" : "no") trust-eval=\(trustVerdict) runtime-anchor-enumerable=\(f.runtimeAnchorHasPublicRoot ? "YES" : "no")"))
 
     // T02 — our leaf certificate carries 100.6.1.2 -> CT-policy bit 7.
     let leafBits = f.perCertBits.first?.1 ?? 0
@@ -1324,13 +1439,14 @@ func evaluate(_ f: Facts) -> [Verdict] {
                       state: hasBit7 ? "CONFIRMED" : "REFUTED",
                       evidence: "leaf-class=\(f.leafClassOID ?? "-") leaf-bits=\(Bits.hex(leafBits))"))
 
-    // T03 — the signer cannot write the CT-policy field: the on-disk value is
-    //        not what the chain earns.
+    // T03 — the signer cannot write the CT-policy field: the policy the chain
+    //        earns appears NOWHERE in the signed material.
     let onDisk = f.signature.policyFieldCandidates.first.map { $0.value } ?? 0
+    let appears = f.signature.policyFieldCandidates.contains { $0.value == f.predictedPolicy }
     v.append(Verdict(id: "T03",
-                      title: "the CT-policy field is not signer-controlled (on-disk value != predicted value)",
-                      state: (onDisk == 0 && f.predictedPolicy != 0) ? "CONFIRMED" : "INCONCLUSIVE",
-                      evidence: "on-disk=\(Bits.hex(onDisk)) predicted=\(Bits.hex(f.predictedPolicy))"))
+                      title: "the CT-policy field is not signer-controlled (the predicted policy is absent from the signature)",
+                      state: (f.predictedPolicy != 0 && !appears) ? "CONFIRMED" : "INCONCLUSIVE",
+                      evidence: "predicted=\(Bits.hex(f.predictedPolicy)) appears-in-signature=\(appears ? "YES" : "no") candidates=" + f.signature.policyFieldCandidates.map { "\($0.name)=\(Bits.hex($0.value))" }.joined(separator: " ")))
 
     // T04 — the policy is the AND across the chain's certificates.
     v.append(Verdict(id: "T04",
@@ -1392,10 +1508,18 @@ func evaluate(_ f: Facts) -> [Verdict] {
                       evidence: "MISValidateSignature(self)=\(misSelf); a non-zero code means the gate DID fire for this app"))
 
     // T10 — libmis does not re-verify the profile's CMS at launch.
-    v.append(Verdict(id: "T10",
-                      title: "libmis does not re-verify the provisioning profile's CMS chain",
-                      state: (profileHasNoValidSignature.hasPrefix("0x00000000") ? "REFUTED" : "CONSISTENT"),
-                      evidence: "MISProfileValidateSignature(own profile)=\(profileHasNoValidSignature)"))
+    // A profile that is not DER-encoded carries no CMS signature at all, so
+    // "the signature validates" means "there was nothing to validate": the
+    // verdict must be N/A, not REFUTED.
+    let profileIsDER = (f.misProfile.first(where: { $0.key == "mis-profile-is-der" })?.value ?? "false") == "true"
+    if !profileIsDER {
+        v.append(Verdict(id: "T10", title: "libmis does not re-verify the provisioning profile's CMS chain",
+                          state: "N/A", evidence: "the profile is not DER-encoded: it has no CMS signature to re-verify"))
+    } else {
+        v.append(Verdict(id: "T10", title: "libmis does not re-verify the provisioning profile's CMS chain",
+                          state: (profileHasNoValidSignature.hasPrefix("0x00000000") ? "REFUTED" : "CONSISTENT"),
+                          evidence: "MISProfileValidateSignature(own profile)=\(profileHasNoValidSignature)"))
+    }
 
     // T11 — the kernel enforces a different slice than the installer validates.
     if f.signature.isFat && f.sliceInfos.count > 1 {
