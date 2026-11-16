@@ -410,7 +410,7 @@ enum MachO {
             let off = Int(big ? readU32BE(b, o + 8) : readU32(b, o + 8))
             let size = Int(big ? readU32BE(b, o + 12) : readU32(b, o + 12))
             guard off >= 0, size > 0, off + size <= b.count else { continue }
-            out.append(Fact(cpu, sub, Data(b[off..<(off + size)])))
+            out.append((cpu, sub, Data(b[off..<(off + size)])))
         }
         return out
     }
@@ -540,7 +540,7 @@ enum MachO {
         var infos: [SliceInfo] = []
         for (i, p) in parts.enumerated() {
             guard let s = readSignature(slice: p.data, index: i) else { continue }
-            var info = SliceInfo(index: i, cputype: p.cpu, cpusubtype: p.sub,
+            let info = SliceInfo(index: i, cputype: p.cpu, cpusubtype: p.sub,
                                  identifier: s.identifier, teamID: s.teamID,
                                  codeDirectoryVersion: s.codeDirectoryVersion,
                                  execSegFlags: s.execSegFlags,
