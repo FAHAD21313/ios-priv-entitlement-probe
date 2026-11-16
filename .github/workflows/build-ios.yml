@@ -47,7 +47,7 @@ jobs:
       - name: Build the crafted differential variant (no signing material needed)
         run: |
           mkdir -p out/variants
-          python3 scripts/make_profile.py --out out/variants/B-internal.mobileprovision \
+          python3 scripts/make_profile.py --out config/B-internal.mobileprovision \
             --team 9XFHY23726 --bundle-id com.research.ios27.privprobe.9XFHY23726 \
             --apple-internal \
             --entitlement com.apple.private.mobileinstall.allowedSPI \
