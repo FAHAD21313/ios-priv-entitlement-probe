@@ -5,7 +5,7 @@
 	<key>get-task-allow</key>
 	<true/>
 	<key>application-identifier</key>
-	<string>9XFHY23726.com.research.ios27.privprobe.9XFHY23726</string>
+	<string>9XFHY23726.com.research.ios27.privprobe</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>9XFHY23726</string>
 	<key>com.apple.private.mobileinstall.allowedSPI</key>
