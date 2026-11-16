@@ -611,48 +611,28 @@ enum MachO {
     /// `claimed-count=0` while the signature clearly had an entitlements slot.
     static func parseEntitlementsBlob(_ d: Data) -> (dict: [String: String], note: String) {
         let b = [UInt8](d)
-        guard b.count > 12 else { return ([:], "blob too short") }
-
-        // The magic may be preceded by a BlobWrapper header, so look for it
-        // instead of assuming it sits at offset 0.
-        var magicAt = -1
-        for i in 0..<min(64, b.count - 4) where readU32BE(b, i) == 0xfade7171 {
-            magicAt = i
-            break
-        }
-        guard magicAt >= 0 else {
-            return ([:], "no 0xfade7171 magic in the first 64 bytes; head=" +
-                    b.prefix(16).map { String(format: "%02x", $0) }.joined())
+        guard b.count > 8 else { return ([:], "too short") }
+        let magic = readU32BE(b, 0)
+        let length = Int(readU32BE(b, 4))
+        guard magic == 0xfade7171, length > 8, length <= b.count else {
+            return ([:], String(format: "bad header magic=0x%08x len=%d", magic, length))
         }
 
-        let count = Int(readU32BE(b, magicAt + 8))
-        guard count > 0, count < 4096 else {
-            return ([:], "magic at \(magicAt), count=\(count)")
-        }
-
-        // The key/value offsets are relative either to the blob's own start or
-        // to the slot's start; try both and keep the one that yields printable
-        // keys.  (Guessing here has already cost two runs.)
-        var best: [String: String] = [:]
-        var bestBase = 0
-        for base in [magicAt, 0] {
+        // ★ THE LAYOUT, FINALLY MEASURED ON THE DEVICE:
+        //   uint32 magic  = 0xfade7171
+        //   uint32 length = 413
+        //   then the REST IS A RAW PLIST — XML here ("<?xml ..." = 3c 3f 78 6d).
+        // It is NOT a (keyOffset, valueOffset) index table. Four runs were lost
+        // to that assumption; the raw bytes in this report settled it.
+        let payload = Data(b[8..<length])
+        if let plist = try? PropertyListSerialization.propertyList(from: payload, options: [], format: nil),
+           let dict = plist as? [String: Any] {
             var out: [String: String] = [:]
-            for i in 0..<count {
-                let e = magicAt + 12 + i * 8
-                guard e + 8 <= b.count else { break }
-                let keyOff = Int(readU32BE(b, e))
-                let valOff = Int(readU32BE(b, e + 4))
-                let ki = base + keyOff, vi = base + valOff
-                guard ki >= 0, ki < b.count, vi >= 0, vi < b.count else { continue }
-                let key = readCString(b, ki)
-                let val = readCString(b, vi)
-                guard !key.isEmpty, key.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) else { continue }
-                out[key] = val.isEmpty ? "true" : val
-            }
-            if out.count > best.count { best = out; bestBase = base }
+            for (k, v) in dict { out[k] = Ents.describe(v) }
+            return (out, "plist keys=\(out.count) len=\(length)")
         }
-        let note = "magic-at=\(magicAt) count=\(count) base=\(bestBase) parsed=\(best.count)"
-        return (best, note)
+        return ([:], "header ok but plist parse failed; head=" +
+                payload.prefix(12).map { String(format: "%02x", $0) }.joined())
     }
 
     /// Read the whole signature of a file (thin or fat).
