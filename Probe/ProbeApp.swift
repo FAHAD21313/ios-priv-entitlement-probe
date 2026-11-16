@@ -320,7 +320,7 @@ enum DER {
             let cf = cand.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(cand.count))
             }
-            if let cf = cf, SecCertificateCreateWithData(cf, &cert) == 0, cert != nil {
+            if let cf = cf, SecCertificateCreateWithData(nil, cf, &cert) == 0, cert != nil {
                 let h = B64.sha256(cand)
                 if !found.contains(where: { B64.sha256($0) == h }) { found.append(cand) }
             }
@@ -475,8 +475,6 @@ enum MachO {
         if let eSlot = sig.slots.first(where: { $0.type == CSSLOT_ENTITLEMENTS }) {
             sig.entitlementsSlotPresent = true
             let e = sb + eSlot.offset
-            let end = min(sb + sig.slots.reduce(0) { max($0.offset, $1.offset) }, bytes.count)
-            _ = end
             let blob = Data(bytes[e..<min(e + 4096, bytes.count)])
             sig.slices.append(SliceInfo(index: index,
                                         identifier: sig.identifier,
@@ -686,67 +684,68 @@ enum Mis {
         guard let f = copyErrorString, let s = f(code) else {
             return String(format: "0x%08x", UInt32(bitPattern: code))
         }
-        return s as String
+        let ns = s as! NSString
+        return ns as String
     }
 
     /// Run the launch-time validator against the running executable.
-    static func run() -> [(String, String)] {
-        var out: [(String, String)] = []
-        out.append(("libmis-dlopen", handle == nil ? "FAILED" : "ok"))
-        out.append(("symbol-MISValidateSignature", validateSignature == nil ? "MISSING" : "present"))
-        out.append(("symbol-MISValidateSignatureAndCopyInfo", validateAndCopyInfo == nil ? "MISSING" : "present"))
-        out.append(("symbol-MISProfileValidateSignature", profileValidateSignature == nil ? "MISSING" : "present"))
+    static func run() -> [Fact] {
+        var out: [Fact] = []
+        out.append(Fact("libmis-dlopen", handle == nil ? "FAILED" : "ok"))
+        out.append(Fact("symbol-MISValidateSignature", validateSignature == nil ? "MISSING" : "present"))
+        out.append(Fact("symbol-MISValidateSignatureAndCopyInfo", validateAndCopyInfo == nil ? "MISSING" : "present"))
+        out.append(Fact("symbol-MISProfileValidateSignature", profileValidateSignature == nil ? "MISSING" : "present"))
 
         let path = Bundle.main.executableURL?.path ?? ""
         if let v = validateSignature {
             let code = v(path as CFString, nil)
-            out.append(("mis-validate-self", String(format: "0x%08x", UInt32(bitPattern: code))))
-            out.append(("mis-validate-self-text", errorText(code)))
+            out.append(Fact("mis-validate-self", String(format: "0x%08x", UInt32(bitPattern: code))))
+            out.append(Fact("mis-validate-self-text", errorText(code)))
         }
         if let v = validateAndCopyInfo {
             var info: CFTypeRef?
             let code = v(path as CFString, nil, &info)
-            out.append(("mis-validate-copy-info", String(format: "0x%08x", UInt32(bitPattern: code))))
-            out.append(("mis-validate-copy-info-text", errorText(code)))
+            out.append(Fact("mis-validate-copy-info", String(format: "0x%08x", UInt32(bitPattern: code))))
+            out.append(Fact("mis-validate-copy-info-text", errorText(code)))
             if let i = info {
-                out.append(("mis-info-type", String(describing: type(of: i))))
+                out.append(Fact("mis-info-type", String(describing: type(of: i))))
             }
         }
         return out
     }
 
     /// Ask libmis to validate OUR OWN embedded profile's signature.
-    static func validateOwnProfile(_ profileData: Data?) -> [(String, String)] {
-        var out: [(String, String)] = []
+    static func validateOwnProfile(_ profileData: Data?) -> [Fact] {
+        var out: [Fact] = []
         guard let profileData, !profileData.isEmpty else {
-            out.append(("mis-profile-validate", "no-profile"))
+            out.append(Fact("mis-profile-validate", "no-profile"))
             return out
         }
         guard let create = profileCreateWithData, let validate = profileValidateSignature else {
-            out.append(("mis-profile-validate", "symbols-unavailable"))
+            out.append(Fact("mis-profile-validate", "symbols-unavailable"))
             return out
         }
         let cf = profileData.withUnsafeBytes { raw -> CFData? in
             CFDataCreate(nil, raw.baseAddress, CFIndex(profileData.count))
         }
         guard let cf = cf, let prof = create(nil, cf)?.takeUnretainedValue() else {
-            out.append(("mis-profile-create", "FAILED"))
+            out.append(Fact("mis-profile-create", "FAILED"))
             return out
         }
-        out.append(("mis-profile-create", "ok"))
+        out.append(Fact("mis-profile-create", "ok"))
         if let der = profileIsDEREncoded {
-            out.append(("mis-profile-is-der", der(prof) ? "true" : "false"))
+            out.append(Fact("mis-profile-is-der", der(prof) ? "true" : "false"))
         }
         let code = validate(prof)
-        out.append(("mis-profile-validate", String(format: "0x%08x", UInt32(bitPattern: code))))
-        out.append(("mis-profile-validate-text", errorText(code)))
+        out.append(Fact("mis-profile-validate", String(format: "0x%08x", UInt32(bitPattern: code))))
+        out.append(Fact("mis-profile-validate-text", errorText(code)))
         if let payload = profileCopyPayload(prof) {
-            out.append(("mis-profile-payload-bytes", String(CFGetLength(payload))))
+            out.append(Fact("mis-profile-payload-bytes", String(CFGetLength(payload))))
         }
         if let gv = profileGetValue {
             for key in ["Entitlements", "AppleInternalProfile", "LocalProvision", "IsXcodeManaged", "UUID"] {
                 if let v = gv(prof, key as CFString) {
-                    out.append(("mis-profile-value \(key)", Ents.describe(v)))
+                    out.append(Fact("mis-profile-value \(key)", Ents.describe(v)))
                 }
             }
         }
@@ -782,35 +781,35 @@ enum AnchorSet {
         return B64.sha256(d)
     }
 
-    static func describe(_ arrRef: CFTypeRef?, label: String) -> [(String, String)] {
-        var out: [(String, String)] = []
+    static func describe(_ arrRef: CFTypeRef?, label: String) -> [Fact] {
+        var out: [Fact] = []
         guard let raw = arrRef else {
             out.append((label, "absent"))
             return out
         }
         let arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
         let n = CFArrayGetCount(arr)
-        out.append(("\(label)-count", String(n)))
+        out.append(Fact("\(label)-count", String(n)))
         var sawPublicRoot = false
         for i in 0..<n {
             guard let p = CFArrayGetValueAtIndex(arr, i) else { continue }
             let cert = unsafeBitCast(p, to: SecCertificate.self)
             let h = sha256(cert)
             if h.hasPrefix(publicAppleRootSHA256) { sawPublicRoot = true }
-            out.append(("\(label)[\(i)]-sha256", h))
+            out.append(Fact("\(label)[\(i)]-sha256", h))
         }
-        out.append(("\(label)-contains-public-apple-root", sawPublicRoot ? "YES" : "no"))
+        out.append(Fact("\(label)-contains-public-apple-root", sawPublicRoot ? "YES" : "no"))
         return out
     }
 
-    static func run() -> [(String, String)] {
-        var out: [(String, String)] = []
-        out.append(("symbol-SecGetAppleTrustAnchors", getAnchors == nil ? "MISSING" : "present"))
+    static func run() -> [Fact] {
+        var out: [Fact] = []
+        out.append(Fact("symbol-SecGetAppleTrustAnchors", getAnchors == nil ? "MISSING" : "present"))
         if let g = getAnchors {
-            for (k, v) in describe(g(), label: "runtime-anchors") { out.append((k, v)) }
+            for fct in describe(g(), label: "runtime-anchors") { out.append(fct) }
         }
         if let c = copyCorporateRoots {
-            for (k, v) in describe(c(), label: "corporate-roots") { out.append((k, v)) }
+            for fct in describe(c(), label: "corporate-roots") { out.append(fct) }
         }
         return out
     }
@@ -831,14 +830,14 @@ enum TrustProbe {
         return unsafeBitCast(s, to: EvaluateTrust.self)
     }()
 
-    static func evaluate(derCerts: [Data]) -> [(String, String)] {
-        var out: [(String, String)] = []
+    static func evaluate(derCerts: [Data]) -> [Fact] {
+        var out: [Fact] = []
         guard let mkTrust = createTrust, let evaluate = evaluateTrust else {
-            out.append(("trust", "symbols-unavailable"))
+            out.append(Fact("trust", "symbols-unavailable"))
             return out
         }
         guard !derCerts.isEmpty else {
-            out.append(("trust-eval", "no-chain"))
+            out.append(Fact("trust-eval", "no-chain"))
             return out
         }
         var certsFound: [SecCertificate] = []
@@ -847,28 +846,28 @@ enum TrustProbe {
             let cf = der.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(der.count))
             }
-            if let cf = cf, SecCertificateCreateWithData(cf, &c) == 0, let cert = c {
+            if let cf = cf, SecCertificateCreateWithData(nil, cf, &c) == 0, let cert = c {
                 certsFound.append(cert)
-                out.append(("chain[\(i)]-sha256", B64.sha256(der)))
+                out.append(Fact("chain[\(i)]-sha256", B64.sha256(der)))
             }
         }
         guard let first = certsFound.first else {
-            out.append(("trust-eval", "no-chain"))
+            out.append(Fact("trust-eval", "no-chain"))
             return out
         }
         var trust: SecTrust?
         let terr = mkTrust(first, SecPolicyCreateBasicX509(), &trust)
         guard terr == 0, let t = trust else {
-            out.append(("trust-basic-x509", "create-failed(\(terr))"))
+            out.append(Fact("trust-basic-x509", "create-failed(\(terr))"))
             return out
         }
         var err: Unmanaged<CFError>?
         let v = evaluate(t, &err)
-        out.append(("trust-basic-x509", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
+        out.append(Fact("trust-basic-x509", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
         if let chain = SecTrustCopyCertificateChain(t) {
-            out.append(("trust-chain-count", String(chain.count)))
+            out.append(Fact("trust-chain-count", String(chain.count)))
             for (i, c) in chain.enumerated() {
-                out.append(("trust-chain[\(i)]-sha256", AnchorSet.sha256(c)))
+                out.append(Fact("trust-chain[\(i)]-sha256", AnchorSet.sha256(c)))
             }
         }
         return out
@@ -878,29 +877,29 @@ enum TrustProbe {
 // MARK: - Effects: is the sandbox actually off?
 
 enum Effects {
-    static func run() -> [(String, String)] {
-        var out: [(String, String)] = []
+    static func run() -> [Fact] {
+        var out: [Fact] = []
         let pid = ProcessInfo.processInfo.processIdentifier
 
         let writable = "/private/var/mobile/Library/probe-\(pid).txt"
         do {
             try "probe".write(toFile: writable, atomically: true, encoding: .utf8)
-            out.append(("write-outside-container", "ALLOWED"))
+            out.append(Fact("write-outside-container", "ALLOWED"))
             try? FileManager.default.removeItem(atPath: writable)
         } catch {
-            out.append(("write-outside-container", "DENIED"))
+            out.append(Fact("write-outside-container", "DENIED"))
         }
 
         let readable = "/private/var/mobile/Library/Caches"
-        out.append(("read-private-dir", FileManager.default.fileExists(atPath: readable) ? "VISIBLE" : "HIDDEN"))
+        out.append(Fact("read-private-dir", FileManager.default.fileExists(atPath: readable) ? "VISIBLE" : "HIDDEN"))
 
         let systemDir = "/private/var/db"
-        out.append(("read-system-db", FileManager.default.fileExists(atPath: systemDir) ? "VISIBLE" : "HIDDEN"))
+        out.append(Fact("read-system-db", FileManager.default.fileExists(atPath: systemDir) ? "VISIBLE" : "HIDDEN"))
 
-        out.append(("container-home", FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "-"))
-        out.append(("uid", String(getuid())))
-        out.append(("euid", String(geteuid())))
-        out.append(("gid", String(getgid())))
+        out.append(Fact("container-home", FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "-"))
+        out.append(Fact("uid", String(getuid())))
+        out.append(Fact("euid", String(geteuid())))
+        out.append(Fact("gid", String(getgid())))
         return out
     }
 }
@@ -917,20 +916,20 @@ enum InstallProbe {
     ]
     static let interesting = ["installApplication", "install", "consumeSource", "coordinate"]
 
-    static func run() -> [(String, String)] {
-        var out: [(String, String)] = []
+    static func run() -> [Fact] {
+        var out: [Fact] = []
 
         let gate = Ents.value("com.apple.private.mobileinstall.allowedSPI")
-        out.append(("install-gate-allowedSPI", gate.present ? "PRESENT" : "absent"))
+        out.append(Fact("install-gate-allowedSPI", gate.present ? "PRESENT" : "absent"))
         let daemon = Ents.value("com.apple.private.installcoordinationd.daemon")
-        out.append(("install-gate-coordinationd", daemon.present ? "PRESENT" : "absent"))
+        out.append(Fact("install-gate-coordinationd", daemon.present ? "PRESENT" : "absent"))
 
         for name in classNames {
             guard let cls = NSClassFromString(name) else {
-                out.append(("class:\(name)", "absent"))
+                out.append(Fact("class:\(name)", "absent"))
                 continue
             }
-            out.append(("class:\(name)", "present"))
+            out.append(Fact("class:\(name)", "present"))
             var selectors: [String] = []
             var count: UInt32 = 0
             if let methods = class_copyMethodList(object_getClass(cls), &count) {
@@ -943,13 +942,21 @@ enum InstallProbe {
                 free(methods)
             }
             let hits = selectors.filter { s in interesting.contains { $0.isEmpty ? false : s.contains($0) } }
-            out.append(("selectors:\(name)", hits.isEmpty ? "none" : hits.joined(separator: " | ")))
+            out.append(Fact("selectors:\(name)", hits.isEmpty ? "none" : hits.joined(separator: " | ")))
         }
         return out
     }
 }
 
 // MARK: - Theory / verdict model
+
+/// One measured fact.  A struct, not a tuple: a tuple has no `.key`/`.value`
+/// members, which is exactly the kind of thing a type-checker should catch.
+struct Fact {
+    let key: String
+    let value: String
+    init(_ k: String, _ v: String) { key = k; value = v }
+}
 
 struct Verdict {
     let id: String
@@ -981,11 +988,11 @@ final class Facts {
     var claimed: [String: String] = [:]
     var perCertBits: [(String, UInt64, [String])] = []
     var predictedPolicy: UInt64 = 0
-    var mis: [(String, String)] = []
-    var misProfile: [(String, String)] = []
-    var anchors: [(String, String)] = []
-    var effects: [(String, String)] = []
-    var install: [(String, String)] = []
+    var mis: [Fact] = []
+    var misProfile: [Fact] = []
+    var anchors: [Fact] = []
+    var effects: [Fact] = []
+    var install: [Fact] = []
     var anchorHasPublicRoot = false
     var runtimeAnchorHasPublicRoot = false
     var leafClassOID: String? = nil
@@ -1150,9 +1157,9 @@ func runHarness(r: Report) -> Facts {
     // 4. LIBMIS ----------------------------------------------------------------
     r.section("LIBMIS")
     f.mis = Mis.run()
-    for (k, v) in f.mis { r.add(k, v) }
+    for fct in f.mis { r.add(fct.key, fct.value) }
     f.misProfile = Mis.validateOwnProfile(f.profileData)
-    for (k, v) in f.misProfile { r.add(k, v) }
+    for fct in f.misProfile { r.add(fct.key, fct.value) }
 
     // 5. ENTITLEMENTS ---------------------------------------------------------
     r.section("ENTITLEMENTS")
@@ -1183,24 +1190,22 @@ func runHarness(r: Report) -> Facts {
     // 7. EFFECTS ---------------------------------------------------------------
     r.section("EFFECTS")
     f.effects = Effects.run()
-    for (k, v) in f.effects { r.add(k, v) }
+    for fct in f.effects { r.add(fct.key, fct.value) }
 
     // 8. ANCHORS ---------------------------------------------------------------
     r.section("ANCHOR")
     f.anchors = AnchorSet.run()
-    for (k, v) in f.anchors { r.add(k, v) }
-    f.runtimeAnchorHasPublicRoot = f.anchors.contains {
-        $0.key == "runtime-anchors-contains-public-apple-root" && $0.value == "YES"
-    }
-    f.anchorHasPublicRoot = f.anchors.contains {
-        $0.key == "corporate-roots-contains-public-apple-root" && $0.value == "YES"
-    }
-    for (k, v) in TrustProbe.evaluate(derCerts: f.profileCerts) { r.add(k, v) }
+    for fct in f.anchors { r.add(fct.key, fct.value) }
+    let runtimeFlag = f.anchors.first(where: { $0.key == "runtime-anchors-contains-public-apple-root" })
+    f.runtimeAnchorHasPublicRoot = (runtimeFlag?.value == "YES")
+    let corporateFlag = f.anchors.first(where: { $0.key == "corporate-roots-contains-public-apple-root" })
+    f.anchorHasPublicRoot = (corporateFlag?.value == "YES")
+    for fct in TrustProbe.evaluate(derCerts: f.profileCerts) { r.add(fct.key, fct.value) }
 
     // 9. INSTALL ---------------------------------------------------------------
     r.section("INSTALL")
     f.install = InstallProbe.run()
-    for (k, v) in f.install { r.add(k, v) }
+    for fct in f.install { r.add(fct.key, fct.value) }
 
     // 10. SCENARIO -------------------------------------------------------------
     r.section("SCENARIO")
