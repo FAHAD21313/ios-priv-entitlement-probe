@@ -1,4 +1,4 @@
-.PHONY: help build ipa scenarios profile collect verdict check-report log selftest clean
+.PHONY: help build ipa scenarios profile identities collect verdict check-report log selftest clean
 
 IDENTITY ?=
 TEAM     ?=
@@ -8,6 +8,7 @@ LOGFILE  ?= amfi.log
 help:
 	@echo "make build            build the unsigned iOS app and IPA (macOS only)"
 	@echo "make scenarios        build the signed variant matrix"
+	@echo "make identities       list every signing identity and its Apple class"
 	@echo "make collect          pull the accumulated report off the device"
 	@echo "make verdict          print the verdict table"
 	@echo "make log              capture the kernel's AMFI lines (Mac, device attached)"
@@ -33,6 +34,9 @@ profile:
 		--entitlement com.apple.private.security.no-sandbox \
 		--apple-internal
 	@cat out/profile.plist
+
+identities:
+	python3 scripts/identity_classes.py
 
 collect:
 	./scripts/collect.sh
