@@ -646,7 +646,7 @@ enum MachO {
                 guard ki >= 0, ki < b.count, vi >= 0, vi < b.count else { continue }
                 let key = readCString(b, ki)
                 let val = readCString(b, vi)
-                guard !key.isEmpty, key.allSatisfy({ $0.isASCII && $0 >= 0x20 && $0 < 0x7f }) else { continue }
+                guard !key.isEmpty, key.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) else { continue }
                 out[key] = val.isEmpty ? "true" : val
             }
             if out.count > best.count { best = out; bestBase = base }
