@@ -320,7 +320,7 @@ enum DER {
             let cf = cand.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(cand.count))
             }
-            if let cf = cf, SecCertificateCreateWithData(nil, cf, &cert) == 0, cert != nil {
+            if let cf = cf, SecCertificateCreateWithData(nil, cf) != nil {
                 let h = B64.sha256(cand)
                 if !found.contains(where: { B64.sha256($0) == h }) { found.append(cand) }
             }
@@ -410,7 +410,7 @@ enum MachO {
             let off = Int(big ? readU32BE(b, o + 8) : readU32(b, o + 8))
             let size = Int(big ? readU32BE(b, o + 12) : readU32(b, o + 12))
             guard off >= 0, size > 0, off + size <= b.count else { continue }
-            out.append((cpu, sub, Data(b[off..<(off + size)])))
+            out.append(Fact(cpu, sub, Data(b[off..<(off + size)])))
         }
         return out
     }
@@ -739,8 +739,11 @@ enum Mis {
         let code = validate(prof)
         out.append(Fact("mis-profile-validate", String(format: "0x%08x", UInt32(bitPattern: code))))
         out.append(Fact("mis-profile-validate-text", errorText(code)))
-        if let payload = profileCopyPayload(prof) {
-            out.append(Fact("mis-profile-payload-bytes", String(CFGetLength(payload))))
+        if let copyPayload = profileCopyPayload {
+            if let payload = copyPayload(prof) {
+                let d = unsafeBitCast(payload, to: CFData.self)
+                out.append(Fact("mis-profile-payload-bytes", String(CFDataGetLength(d))))
+            }
         }
         if let gv = profileGetValue {
             for key in ["Entitlements", "AppleInternalProfile", "LocalProvision", "IsXcodeManaged", "UUID"] {
@@ -784,7 +787,7 @@ enum AnchorSet {
     static func describe(_ arrRef: CFTypeRef?, label: String) -> [Fact] {
         var out: [Fact] = []
         guard let raw = arrRef else {
-            out.append((label, "absent"))
+            out.append(Fact(label, "absent"))
             return out
         }
         let arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
@@ -846,7 +849,7 @@ enum TrustProbe {
             let cf = der.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(der.count))
             }
-            if let cf = cf, SecCertificateCreateWithData(nil, cf, &c) == 0, let cert = c {
+            if let cf = cf, let cert = SecCertificateCreateWithData(nil, cf) {
                 certsFound.append(cert)
                 out.append(Fact("chain[\(i)]-sha256", B64.sha256(der)))
             }
@@ -865,9 +868,12 @@ enum TrustProbe {
         let v = evaluate(t, &err)
         out.append(Fact("trust-basic-x509", v == 0 ? "TRUSTED" : "NOT-TRUSTED(\(v))"))
         if let chain = SecTrustCopyCertificateChain(t) {
-            out.append(Fact("trust-chain-count", String(chain.count)))
-            for (i, c) in chain.enumerated() {
-                out.append(Fact("trust-chain[\(i)]-sha256", AnchorSet.sha256(c)))
+            let n = CFArrayGetCount(chain)
+            out.append(Fact("trust-chain-count", String(n)))
+            for i in 0..<n {
+                guard let p = CFArrayGetValueAtIndex(chain, i) else { continue }
+                let cert = unsafeBitCast(p, to: SecCertificate.self)
+                out.append(Fact("trust-chain[\(i)]-sha256", AnchorSet.sha256(cert)))
             }
         }
         return out
