@@ -30,7 +30,7 @@ import tempfile
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROFILE = os.path.join(ROOT, "out", "variants", "B-internal.mobileprovision")
+PROFILE = os.path.join(ROOT, "config", "B-internal.mobileprovision")
 ENTITLEMENTS = os.path.join(ROOT, "config", "private-entitlements.plist")
 VARIANT = "B-internal"
 
