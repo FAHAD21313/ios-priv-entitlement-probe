@@ -1,4 +1,4 @@
-.PHONY: help build ipa scenarios profile identities collect verdict check-report log selftest clean
+.PHONY: help build ipa crafted scenarios profile identities collect verdict check-report log selftest clean
 
 IDENTITY ?=
 TEAM     ?=
@@ -7,6 +7,7 @@ LOGFILE  ?= amfi.log
 
 help:
 	@echo "make build            build the unsigned iOS app and IPA (macOS only)"
+	@echo "make crafted          build the crafted-profile experiment IPA (no Mac needed)"
 	@echo "make scenarios        build the signed variant matrix"
 	@echo "make identities       list every signing identity and its Apple class"
 	@echo "make collect          pull the accumulated report off the device"
@@ -22,6 +23,15 @@ build:
 	./scripts/build_ios.sh
 
 ipa: build
+
+crafted: build
+	@mkdir -p out/variants
+	@python3 scripts/make_profile.py --out out/variants/B-internal.mobileprovision \
+		--team 9XFHY23726 --bundle-id com.research.ios27.privprobe.9XFHY23726 \
+		--apple-internal \
+		--entitlement com.apple.private.mobileinstall.allowedSPI \
+		--entitlement com.apple.private.security.no-sandbox
+	python3 scripts/make_crafted_ipa.py
 
 scenarios:
 	@test -n "$(IDENTITY)" || (echo "usage: make scenarios IDENTITY=\"Apple Development: YOU\" TEAM=TEAMID" && exit 2)

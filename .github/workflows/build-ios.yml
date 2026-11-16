@@ -44,6 +44,16 @@ jobs:
           grep -rn "SecStaticCodeCreateWithPath" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
           grep -rn "SecRequirementCreateWithString" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
 
+      - name: Build the crafted differential variant (no signing material needed)
+        run: |
+          mkdir -p out/variants
+          python3 scripts/make_profile.py --out out/variants/B-internal.mobileprovision \
+            --team 9XFHY23726 --bundle-id com.research.ios27.privprobe.9XFHY23726 \
+            --apple-internal \
+            --entitlement com.apple.private.mobileinstall.allowedSPI \
+            --entitlement com.apple.private.security.no-sandbox
+          python3 scripts/make_crafted_ipa.py
+
       - name: Package the app bundle as a zip
         run: |
           cd out
@@ -61,6 +71,12 @@ jobs:
         with:
           name: Probe-unsigned-ios-app-zip
           path: out/Probe-unsigned.app.zip
+
+      - name: Upload the CRAFTED differential variant
+        uses: actions/upload-artifact@v4
+        with:
+          name: Probe-B-crafted-ipa
+          path: out/Probe-B-crafted.ipa
 
       - name: Upload the tools
         uses: actions/upload-artifact@v4
