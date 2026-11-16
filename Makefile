@@ -1,15 +1,31 @@
-.PHONY: help build ipa profile check-report clean
+.PHONY: help build ipa scenarios profile collect verdict check-report log selftest clean
+
+IDENTITY ?=
+TEAM     ?=
+REAL_PROFILE ?=
+LOGFILE  ?= amfi.log
 
 help:
-	@echo "make ipa            build the unsigned iOS app and IPA (macOS only)"
-	@echo "make profile        print the crafted provisioning profile"
-	@echo "make check-report   summarise a device report: make check-report f=probe-report.txt"
-	@echo "make clean          remove build output"
+	@echo "make build            build the unsigned iOS app and IPA (macOS only)"
+	@echo "make scenarios        build the signed variant matrix"
+	@echo "make collect          pull the accumulated report off the device"
+	@echo "make verdict          print the verdict table"
+	@echo "make log              capture the kernel's AMFI lines (Mac, device attached)"
+	@echo "make selftest         run the local checks (no device, no macOS needed)"
+	@echo "make clean            remove build output"
+	@echo
+	@echo "  scenarios: make scenarios IDENTITY='Apple Development: YOU' TEAM=TEAMID"
+	@echo "  verdict:   make verdict LOGFILE=amfi.log"
 
 build:
 	./scripts/build_ios.sh
 
 ipa: build
+
+scenarios:
+	@test -n "$(IDENTITY)" || (echo "usage: make scenarios IDENTITY=\"Apple Development: YOU\" TEAM=TEAMID" && exit 2)
+	./scripts/scenarios.sh --identity "$(IDENTITY)" --team "$(TEAM)" \
+		$(if $(REAL_PROFILE),--real-profile "$(REAL_PROFILE)",)
 
 profile:
 	python3 scripts/make_profile.py --out out/profile.plist \
@@ -18,9 +34,27 @@ profile:
 		--apple-internal
 	@cat out/profile.plist
 
+collect:
+	./scripts/collect.sh
+
+verdict:
+	@test -f reports/probe-report.txt || (echo "no report yet — run 'make collect'" && exit 2)
+	python3 scripts/verdict.py reports/probe-report.txt \
+		$(if $(wildcard $(LOGFILE)),--log $(LOGFILE),)
+
 check-report:
-	@test -n "$(f)" || (echo "usage: make check-report f=<report.txt>" && exit 2)
+	@test -n "$(f)" || (echo "usage: make check-report f=probe-report.txt" && exit 2)
 	python3 scripts/parse_report.py $(f)
 
+log:
+	log show --last 30m --predicate 'process == "amfid" OR eventMessage CONTAINS[c] "AMFI"' > $(LOGFILE)
+	@echo "wrote $(LOGFILE)"
+
+selftest:
+	python3 -m py_compile scripts/make_profile.py scripts/verdict.py scripts/parse_report.py scripts/execsegflags.py
+	@echo "python: ok"
+	@bash -n scripts/build_ios.sh scripts/scenarios.sh scripts/collect.sh && echo "shell: ok"
+	@python3 scripts/selftest.py
+
 clean:
-	rm -rf out
+	rm -rf out reports

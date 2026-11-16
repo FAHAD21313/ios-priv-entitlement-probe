@@ -20,6 +20,20 @@ jobs:
           swiftc --version
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Local self-test (no device, no signing)
+        run: |
+          python3 -m py_compile scripts/*.py
+          bash -n scripts/*.sh
+          python3 scripts/selftest.py
+
+      - name: Type-check the probe against the iOS SDK
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          # -typecheck resolves every symbol against the real SDK, so a typo in
+          # a Security.framework prototype is caught here and never on a device.
+          swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios16.0 \
+                 -parse-as-library Probe/ProbeApp.swift
+
       - name: Build the unsigned iOS app
         run: ./scripts/build_ios.sh
 
@@ -48,7 +62,7 @@ jobs:
           name: Probe-unsigned-ios-app-zip
           path: out/Probe-unsigned.app.zip
 
-      - name: Upload the profile maker for convenience
+      - name: Upload the tools
         uses: actions/upload-artifact@v4
         with:
           name: scripts

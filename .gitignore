@@ -8,3 +8,5 @@ build/
 *.key
 *.certSigningRequest
 .DS_Store
+reports/
+*.log
