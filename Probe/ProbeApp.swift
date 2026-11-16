@@ -228,15 +228,20 @@ final class Report {
 /// An Objective-C exception raised inside a probe must not take the evidence
 /// with it.  The handler writes the exception into the report and exits.
 enum CrashGuard {
+    /// The handler is a plain C function pointer, so it may not capture
+    /// anything: the report is reached through a static instead.
+    private static var current: Report?
+
     static func install(_ report: Report) {
+        current = report
         NSSetUncaughtExceptionHandler { exception in
             let name = exception.name.rawValue
             let reason = exception.reason ?? "?"
             let stack = exception.callStackSymbols.joined(separator: " | ")
-            report.appendToDisk("CRASH exception=\(name)")
-            report.appendToDisk("CRASH reason=\(reason)")
-            report.appendToDisk("CRASH stack=\(stack)")
-            report.appendToDisk("=== end of run (crashed) ===")
+            CrashGuard.current?.appendToDisk("CRASH exception=\(name)")
+            CrashGuard.current?.appendToDisk("CRASH reason=\(reason)")
+            CrashGuard.current?.appendToDisk("CRASH stack=\(stack)")
+            CrashGuard.current?.appendToDisk("=== end of run (crashed) ===")
             exit(70)
         }
     }
@@ -350,7 +355,6 @@ enum DER {
             guard total > 100, end <= bytes.count, start + 2 <= bytes.count else { i += 1; continue }
             guard bytes[start] == 0x30 else { i += 1; continue }
             let cand = Data(bytes[i..<end])
-            var cert: SecCertificate?
             let cf = cand.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(cand.count))
             }
@@ -905,7 +909,6 @@ enum TrustProbe {
         }
         var certsFound: [SecCertificate] = []
         for (i, der) in derCerts.enumerated() {
-            var c: SecCertificate?
             let cf = der.withUnsafeBytes { raw -> CFData? in
                 CFDataCreate(nil, raw.baseAddress, CFIndex(der.count))
             }
@@ -1002,8 +1005,8 @@ enum InstallProbe {
                 for i in 0..<Int(count) { selectors.append(NSStringFromSelector(method_getName(methods[i]))) }
                 free(methods)
             }
-            if let meta = object_getClass(cls) as? AnyClass,
-               let methods = class_copyMethodList(meta, &count) {
+            let meta: AnyClass = object_getClass(cls)
+            if let methods = class_copyMethodList(meta, &count) {
                 for i in 0..<Int(count) { selectors.append(NSStringFromSelector(method_getName(methods[i]))) }
                 free(methods)
             }
