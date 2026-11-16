@@ -1216,12 +1216,12 @@ func runHarness(r: Report) -> Facts {
         sigKind = "unknown"
     }
     let profileProvisionsPrivate = ((pdict["Entitlements"] as? [String: Any])?.keys.contains { $0.hasPrefix("com.apple.private.") }) ?? false
-    let internal = (pdict["AppleInternalProfile"] as? Bool) == true
-    f.scenario = "\(sigKind)+\(pkind)+\(profileProvisionsPrivate ? "provisions-priv" : "no-priv")+\(internal ? "internal" : "not-internal")"
+    let isInternalProfile = (pdict["AppleInternalProfile"] as? Bool) == true
+    f.scenario = "\(sigKind)+\(pkind)+\(profileProvisionsPrivate ? "provisions-priv" : "no-priv")+\(isInternalProfile ? "internal" : "not-internal")"
     r.add("scenario-signature", sigKind)
     r.add("scenario-profile", pkind)
     r.add("scenario-profile-provisions-private", profileProvisionsPrivate ? "YES" : "no")
-    r.add("scenario-profile-apple-internal", internal ? "YES" : "no")
+    r.add("scenario-profile-apple-internal", isInternalProfile ? "YES" : "no")
     r.add("scenario-id", f.scenario)
 
     r.flush()
@@ -1277,7 +1277,7 @@ func evaluate(_ f: Facts) -> [Verdict] {
                       evidence: "look for \"AMFI: '%s': locally signed\" in the kernel log; its ABSENCE confirms P9 is dead"))
 
     // T07 — the kernel does not verify the provisioning profile's own CMS.
-    let profileHasNoValidSignature = f.misProfile.first { $0.key == "mis-profile-validate" }?.value ?? ""
+    let profileHasNoValidSignature = f.misProfile.first(where: { $0.key == "mis-profile-validate" })?.value ?? ""
     let privateHonoured = f.honoured.keys.contains { $0.hasPrefix("com.apple.private.") }
     if f.profileData == nil {
         v.append(Verdict(id: "T07", title: "the kernel does not verify the provisioning profile's own CMS chain",
@@ -1294,22 +1294,22 @@ func evaluate(_ f: Facts) -> [Verdict] {
 
     // T08 — the entitlement must be provisioned or the profile must be Apple-internal.
     let provisionsPriv = ((f.profileDict["Entitlements"] as? [String: Any])?.keys.contains { $0.hasPrefix("com.apple.private.") }) ?? false
-    let internal = (f.profileDict["AppleInternalProfile"] as? Bool) == true
-    if !provisionsPriv && !internal {
+    let isInternalProfile = (f.profileDict["AppleInternalProfile"] as? Bool) == true
+    if !provisionsPriv && !isInternalProfile {
         v.append(Verdict(id: "T08", title: "a private entitlement requires a provisioned or Apple-internal profile",
                           state: "N/A", evidence: "this scenario claims no private entitlement"))
     } else if privateHonoured {
         v.append(Verdict(id: "T08", title: "a private entitlement requires a provisioned or Apple-internal profile",
                           state: "CONSISTENT",
-                          evidence: "honoured with provisions-priv=\(provisionsPriv) apple-internal=\(internal)"))
+                          evidence: "honoured with provisions-priv=\(provisionsPriv) apple-internal=\(isInternalProfile)"))
     } else {
         v.append(Verdict(id: "T08", title: "a private entitlement requires a provisioned or Apple-internal profile",
                           state: "CONSISTENT",
-                          evidence: "refused with provisions-priv=\(provisionsPriv) apple-internal=\(internal)"))
+                          evidence: "refused with provisions-priv=\(provisionsPriv) apple-internal=\(isInternalProfile)"))
     }
 
     // T09 — the launch gate is conditional on mis.db, not an independent wall.
-    let misSelf = f.mis.first { $0.key == "mis-validate-self" }?.value ?? "-"
+    let misSelf = f.mis.first(where: { $0.key == "mis-validate-self" })?.value ?? "-"
     v.append(Verdict(id: "T09",
                       title: "the launch-time validator (libmis) does not independently re-verify the profile",
                       state: (misSelf == "0x00000000") ? "CONFIRMED" : "INCONCLUSIVE",
@@ -1335,7 +1335,7 @@ func evaluate(_ f: Facts) -> [Verdict] {
     }
 
     // T12 — the privileged install channel.
-    let gate = f.install.first { $0.key == "install-gate-allowedSPI" }?.value ?? "absent"
+    let gate = f.install.first(where: { $0.key == "install-gate-allowedSPI" })?.value ?? "absent"
     v.append(Verdict(id: "T12",
                       title: "the privileged install channel opens when the caller holds allowedSPI",
                       state: (gate == "PRESENT") ? "CONFIRMED" : "REFUTED",
@@ -1353,7 +1353,7 @@ func evaluate(_ f: Facts) -> [Verdict] {
     }
 
     // T14 — is the sandbox actually off?
-    let outside = f.effects.first { $0.key == "write-outside-container" }?.value ?? "-"
+    let outside = f.effects.first(where: { $0.key == "write-outside-container" })?.value ?? "-"
     v.append(Verdict(id: "T14",
                       title: "a no-sandbox entitlement, when honoured, actually lifts the sandbox",
                       state: (outside == "ALLOWED") ? "CONFIRMED" : (privateHonoured ? "REFUTED" : "N/A"),
