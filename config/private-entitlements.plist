@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>get-task-allow</key>
+	<true/>
+	<key>application-identifier</key>
+	<string>9XFHY23726.com.research.ios27.privprobe.9XFHY23726</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>9XFHY23726</string>
+	<key>com.apple.private.mobileinstall.allowedSPI</key>
+	<true/>
+	<key>com.apple.private.installcoordinationd.daemon</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.security.no-container</key>
+	<true/>
+</dict>
+</plist>
