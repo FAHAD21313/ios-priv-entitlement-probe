@@ -1182,8 +1182,7 @@ enum Dyld4Probe {
     }
 
     static func closureDirectory() -> String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/com.apple.dyld").path
+        (NSHomeDirectory() as NSString).appendingPathComponent("Library/Caches/com.apple.dyld")
     }
 
     /// Enumerate every *.dyld4 file; the graded-arch id is shared by all
@@ -1198,7 +1197,7 @@ enum Dyld4Probe {
 
     static func bootToken(_ path: String) -> String {
         let n = xattrName.withCString { name -> Int in
-            Int(getxattr(path, name, nil, nil, 0, 0))
+            Int(getxattr(path, name, nil, 0, 0, 0))
         }
         guard n > 0, n <= 256 else { return "-" }
         var buf = [CChar](repeating: 0, count: n + 1)
@@ -1283,12 +1282,12 @@ enum Dyld4Probe {
         crafted[refOff] = 0xff
         crafted[refOff + 1] = 0xff
         let backup = path + ".probe-backup"
-        try? original.write(toFile: backup, atomically: true)
+        try? original.write(to: URL(fileURLWithPath: backup), options: .atomic)
         defer {                                   // ALWAYS restore
-            try? original.write(toFile: path, atomically: true)
+            try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
             try? FileManager.default.removeItem(atPath: backup)
         }
-        guard (try? crafted.write(toFile: path, atomically: true)) != nil else {
+        guard (try? crafted.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
             return "PoC: write failed"
         }
         // The xattr is unchanged (we rewrote only the file body), so the
