@@ -184,6 +184,7 @@ enum CTPolicy {
 
 final class Report {
     private(set) var lines: [String] = []
+    private var written = 0
     private let path: String
 
     init() {
@@ -191,21 +192,54 @@ final class Report {
         path = (dir?.appendingPathComponent("probe-report.txt").path) ?? "/tmp/probe-report.txt"
     }
 
-    /// Persist after every section: a trap in a later probe must not destroy
-    /// the evidence already collected.
+    /// Append only what is not on disk yet.  A true append, so the crash
+    /// handler can add its own lines without the next flush moving them.
     func flush() {
-        let existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        try? (existing + text).write(toFile: path, atomically: true, encoding: .utf8)
+        guard lines.count > written else { return }
+        let chunk = lines[written...].joined(separator: "\n") + "\n"
+        appendRaw(chunk)
+        written = lines.count
     }
+
+    private func appendRaw(_ s: String) {
+        if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile()
+            h.write(Data(s.utf8))
+            try? h.close()
+        } else {
+            try? s.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Used by the crash handler: the exception has to survive the abort.
+    func appendToDisk(_ line: String) { appendRaw(line + "\n") }
 
     func add(_ s: String) {
         lines.append(s)
         ProbeLogger.shared.log(s)
+        flush()
     }
     func add(_ k: String, _ v: String) { add("\(k)=\(v)") }
-    func section(_ s: String) { lines.append("--- \(s) ---") }
+    func section(_ s: String) { lines.append("--- \(s) ---"); flush() }
     var text: String { lines.joined(separator: "\n") + "\n" }
     var filePath: String { path }
+}
+
+/// An Objective-C exception raised inside a probe must not take the evidence
+/// with it.  The handler writes the exception into the report and exits.
+enum CrashGuard {
+    static func install(_ report: Report) {
+        NSSetUncaughtExceptionHandler { exception in
+            let name = exception.name.rawValue
+            let reason = exception.reason ?? "?"
+            let stack = exception.callStackSymbols.joined(separator: " | ")
+            report.appendToDisk("CRASH exception=\(name)")
+            report.appendToDisk("CRASH reason=\(reason)")
+            report.appendToDisk("CRASH stack=\(stack)")
+            report.appendToDisk("=== end of run (crashed) ===")
+            exit(70)
+        }
+    }
 }
 
 // MARK: - Dynamic Security.framework entry points
@@ -610,14 +644,32 @@ enum Ents {
         return (true, describe(v))
     }
 
+    /// Describe an arbitrary Objective-C value WITHOUT messaging it.
+    ///
+    /// `value as? String` is NOT safe on an arbitrary object: a conditional
+    /// cast to a *bridged* Swift type makes the runtime send `length` to the
+    /// object to see whether it is an NSString.  An NSDictionary has no
+    /// `length`, so the cast raises NSInvalidArgumentException instead of
+    /// returning nil — which is exactly how the first device run died:
+    ///
+    ///     -[__NSFrozenDictionaryM length]: unrecognized selector sent to
+    ///     instance 0x138c1d720
+    ///
+    /// Every test below is an `is` check, which only reads the isa pointer,
+    /// and the bridged conversion happens only after the class is known.
     static func describe(_ v: Any) -> String {
-        if let b = v as? Bool { return b ? "true" : "false" }
-        if let n = v as? NSNumber { return n.boolValue ? "true" : "false" }
-        if let s = v as? String { return s }
-        if let arr = v as? [Any] { return "[" + arr.map { describe($0) }.joined(separator: ",") + "]" }
-        if let d = v as? [String: Any] {
-            return "dict(" + d.keys.sorted().joined(separator: ",") + ")"
+        if v is NSNull { return "null" }
+        if v is NSDictionary {
+            let d = v as! NSDictionary
+            let keys = d.allKeys.map { String(describing: $0) }.sorted()
+            return "dict(" + keys.joined(separator: ",") + ")"
         }
+        if v is NSArray {
+            let a = v as! NSArray
+            return "[" + a.map { describe($0) }.joined(separator: ",") + "]"
+        }
+        if let n = v as? NSNumber { return n.boolValue ? "true" : "false" }
+        if let s = v as? NSString { return s as String }
         return String(describing: type(of: v))
     }
 }
@@ -741,8 +793,12 @@ enum Mis {
         out.append(Fact("mis-profile-validate-text", errorText(code)))
         if let copyPayload = profileCopyPayload {
             if let payload = copyPayload(prof) {
-                let d = unsafeBitCast(payload, to: CFData.self)
-                out.append(Fact("mis-profile-payload-bytes", String(CFDataGetLength(d))))
+                if CFGetTypeID(payload) == CFDataGetTypeID() {
+                    let d = unsafeBitCast(payload, to: CFData.self)
+                    out.append(Fact("mis-profile-payload-bytes", String(CFDataGetLength(d))))
+                } else {
+                    out.append(Fact("mis-profile-payload-bytes", "not-cfdata"))
+                }
             }
         }
         if let gv = profileGetValue {
@@ -788,6 +844,10 @@ enum AnchorSet {
         var out: [Fact] = []
         guard let raw = arrRef else {
             out.append(Fact(label, "absent"))
+            return out
+        }
+        if CFGetTypeID(raw) != CFArrayGetTypeID() {
+            out.append(Fact(label, "not-an-array"))
             return out
         }
         let arr = unsafeBitCast(raw as AnyObject, to: CFArray.self)
@@ -1032,6 +1092,7 @@ func readProfile() -> (Data?, [String: Any], String) {
 }
 
 func runHarness(r: Report) -> Facts {
+    CrashGuard.install(r)
     let f = Facts()
 
     r.add("=== iOS private-entitlement probe — differential run ===")
