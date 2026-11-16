@@ -1005,10 +1005,11 @@ enum InstallProbe {
                 for i in 0..<Int(count) { selectors.append(NSStringFromSelector(method_getName(methods[i]))) }
                 free(methods)
             }
-            let meta: AnyClass = object_getClass(cls)
-            if let methods = class_copyMethodList(meta, &count) {
-                for i in 0..<Int(count) { selectors.append(NSStringFromSelector(method_getName(methods[i]))) }
-                free(methods)
+            if let meta = object_getClass(cls) {
+                if let methods = class_copyMethodList(meta, &count) {
+                    for i in 0..<Int(count) { selectors.append(NSStringFromSelector(method_getName(methods[i]))) }
+                    free(methods)
+                }
             }
             let hits = selectors.filter { s in interesting.contains { $0.isEmpty ? false : s.contains($0) } }
             out.append(Fact("selectors:\(name)", hits.isEmpty ? "none" : hits.joined(separator: " | ")))
