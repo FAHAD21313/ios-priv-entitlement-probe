@@ -162,7 +162,18 @@ enum Dyld4 {
         return r
     }
 
-    /// Opt-in PoC. A normal iOS app cannot posix_spawn its own executable
+    /// PROFESSIONAL PoC — exact working method, established on-device:
+    ///
+    ///  1. read the boot-token xattr from the LIVE closure (never from a
+    ///     backup — an atomic write drops xattrs, and setxattr is denied);
+    ///  2. chmod(path, 0600) because dyld creates the closure 0444;
+    ///  3. FileHandle in-place write of 0xff 0xff at loader[0].Ref (+0x6),
+    ///     which preserves the inode and therefore the boot token;
+    ///  4. force-quit + reopen (dyld validates the crafted closure at exec);
+    ///  5. on the next launch, inspect BEFORE restoring, report
+    ///     POC-SEEN-BY-DYLD, then restore the original bytes in place.
+    ///
+    /// A normal iOS app cannot posix_spawn its own executable
     /// (EPERM — measured on 27.0.1), so this is human-in-the-loop:
     ///   tap -> patch Ref to 0xffff + leave a backup
     ///        -> user force-quits and reopens the app
@@ -334,7 +345,7 @@ final class VC: UIViewController {
         title = "dyld4 OOB"
         status.numberOfLines = 3; status.font = .systemFont(ofSize: 12)
         status.textAlignment = .center
-        runBtn.setTitle("Run", for: .normal)
+        runBtn.setTitle("Run probe", for: .normal)
         runBtn.addTarget(self, action: #selector(run), for: .touchUpInside)
         pocBtn.setTitle("PoC OOB", for: .normal)
         pocBtn.addTarget(self, action: #selector(poc), for: .touchUpInside)
@@ -349,7 +360,7 @@ final class VC: UIViewController {
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
             stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
         ])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.run() }
+        // No automatic run — the researcher presses the button.
     }
 
     @objc private func run() {

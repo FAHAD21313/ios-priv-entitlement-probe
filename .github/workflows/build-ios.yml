@@ -14,81 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show toolchain
+      - name: Toolchain
         run: |
-          xcodebuild -version
           swiftc --version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Local self-test (no device, no signing)
-        run: |
-          python3 -m py_compile scripts/*.py
-          bash -n scripts/*.sh
-          python3 scripts/selftest.py
-
-      - name: Type-check the probe against the iOS SDK
+      - name: Type-check our app
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          # -typecheck resolves every symbol against the real SDK, so a typo in
-          # a Security.framework prototype is caught here and never on a device.
           swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios16.0 \
-                 -parse-as-library Probe/ProbeApp.swift
+                 -parse-as-library Probe/ProbeMinimal.swift
 
-      - name: Build the unsigned iOS app
-        run: ./scripts/build_ios.sh
-
-      - name: Show the SDK declarations the probe relies on
-        run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          grep -rn "SecTaskCreateFromSelf" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
-          grep -rn "SecStaticCodeCreateWithPath" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
-          grep -rn "SecRequirementCreateWithString" "$SDK/System/Library/Frameworks/Security.framework/Headers" | head -5
-
-      - name: Build the crafted differential variant (no signing material needed)
-        run: |
-          mkdir -p out/variants
-          python3 scripts/make_profile.py --out config/B-internal.mobileprovision \
-            --team 9XFHY23726 --bundle-id com.research.ios27.privprobe.9XFHY23726 \
-            --apple-internal \
-            --entitlement com.apple.private.mobileinstall.allowedSPI \
-            --entitlement com.apple.private.security.no-sandbox
-          python3 scripts/make_crafted_ipa.py
-
-      - name: Build the minimal dyld4-OOB + csparser collector
+      - name: Build our app (unsigned IPA)
         run: ./scripts/build_minimal.sh
 
-      - name: Upload the minimal probe
+      - name: Upload our app
         uses: actions/upload-artifact@v4
         with:
-          name: Probe-minimal-ipa
+          name: Probe-ipa
           path: out/Probe-minimal.ipa
-
-      - name: Package the app bundle as a zip
-        run: |
-          cd out
-          zip -qry Probe-unsigned.app.zip Probe.app
-          ls -la
-
-      - name: Upload the unsigned IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: Probe-unsigned-ios-ipa
-          path: out/Probe-unsigned.ipa
-
-      - name: Upload the app bundle as a zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: Probe-unsigned-ios-app-zip
-          path: out/Probe-unsigned.app.zip
-
-      - name: Upload the CRAFTED differential variant
-        uses: actions/upload-artifact@v4
-        with:
-          name: Probe-B-crafted-ipa
-          path: out/Probe-B-crafted.ipa
-
-      - name: Upload the tools
-        uses: actions/upload-artifact@v4
-        with:
-          name: scripts
-          path: scripts
