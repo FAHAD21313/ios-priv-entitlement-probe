@@ -13,7 +13,7 @@ mkdir -p "$OUT/Probe.app"
 clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 \
       -c Probe/explore_helper.c -o "$OUT/explore_helper.o"
 
-swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 -parse-as-library \
+swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 \
        Probe/main.swift Probe/ProbeMinimal.swift "$OUT/explore_helper.o" \
        -o "$OUT/Probe.app/Probe"
 
