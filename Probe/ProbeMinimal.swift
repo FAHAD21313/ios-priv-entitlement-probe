@@ -285,8 +285,9 @@ private func probe_crash_dyld(_ fire: Int32) -> UnsafePointer<CChar>?
 /// the actual call) lives in C; Swift only writes the setup info to the report
 /// BEFORE firing so the evidence survives the crash.
 enum CrashProof {
-    static func run(fire: Bool) -> String {
-        guard let p = probe_crash_dyld(fire ? 1 : 0) else { return "CRASH: no status" }
+    // fire: 0 = info, 1 = crash (read-only guard page), 2 = dry run (RW array)
+    static func run(fire: Int32) -> String {
+        guard let p = probe_crash_dyld(fire) else { return "CRASH: no status" }
         return String(cString: p)
     }
 }
@@ -403,17 +404,23 @@ final class VC: UIViewController {
 
     @objc private func crashOOB() {
         crashBtn.isEnabled = false
-        // 1) Persist the setup/expected-PC info to the report BEFORE crashing.
-        //    Rep.add() flushes to disk on every line, so this survives the SIGSEGV.
-        let setup = CrashProof.run(fire: false)
-        let r = Rep(); r.section("CRASH-PROOF"); r.add(setup)
-        r.add("firing unchecked dyld accessor — expect SIGSEGV (EXC_BAD_ACCESS) at dyld")
+        // 1) Persist setup + a DRY RUN to the report BEFORE crashing.
+        //    Rep.add() flushes every line to disk, so this survives the SIGSEGV.
+        let r = Rep(); r.section("CRASH-PROOF")
+        r.add(CrashProof.run(fire: 0))
+        r.add(CrashProof.run(fire: 2))   // proves the OOB write actually lands
+        r.add("firing unchecked dyld accessor — expect SIGSEGV at expected-fault-PC")
         self.report += r.text; self.text.text += r.text
         UIPasteboard.general.string = self.report
         status.text = "Firing crash… check Settings › Privacy & Security › Analytics for the .ips"
-        // 2) Fire on a background queue; the process is expected to die here.
+        // 2) Fire on a background queue; log the result if it unexpectedly returns.
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = CrashProof.run(fire: true)
+            let result = CrashProof.run(fire: 1)
+            let r2 = Rep(); r2.add("CRASH-FIRE-RESULT \(result)")
+            DispatchQueue.main.async {
+                self.report += r2.text; self.text.text += r2.text
+                self.crashBtn.isEnabled = true
+            }
         }
     }
 
