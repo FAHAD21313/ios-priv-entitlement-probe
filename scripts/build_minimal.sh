@@ -14,7 +14,7 @@ clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 \
       -c Probe/explore_helper.c -o "$OUT/explore_helper.o"
 
 swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 -parse-as-library \
-       "$OUT/explore_helper.o" Probe/ProbeMinimal.swift \
+       Probe/main.swift Probe/ProbeMinimal.swift "$OUT/explore_helper.o" \
        -o "$OUT/Probe.app/Probe"
 
 sed "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|$BUNDLE_ID|g; s|\$(EXECUTABLE_NAME)|Probe|g; s|\$(PRODUCT_NAME)|Probe|g" \

@@ -23,7 +23,7 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios16.0 \
-                 -parse-as-library Probe/ProbeMinimal.swift
+                 -parse-as-library Probe/main.swift Probe/ProbeMinimal.swift
 
       - name: Build our app (unsigned IPA)
         run: ./scripts/build_minimal.sh
