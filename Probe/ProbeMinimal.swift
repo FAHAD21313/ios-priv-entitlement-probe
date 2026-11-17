@@ -73,11 +73,11 @@ enum Dyld4 {
         defer { free(cpath) }
         let name = strdup("com.apple.dyld")!
         defer { free(name) }
-        let n = getxattr(cpath, name, nil, 0, 0, 0)
+        let n = Int(getxattr(cpath, name, nil, 0, 0, 0))
         guard n > 0, n <= 256 else { return nil }
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: n)
         defer { buf.deallocate() }
-        let got = getxattr(cpath, name, buf, n, 0, 0)
+        let got = Int(getxattr(cpath, name, buf, n, 0, 0))
         guard got > 0 else { return nil }
         return Data(bytes: buf, count: got)
     }
@@ -91,7 +91,7 @@ enum Dyld4 {
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
         defer { buf.deallocate() }
         bytes.copyBytes(to: buf, count: bytes.count)
-        return setxattr(cpath, name, UnsafeRawPointer(buf), bytes.count, 0, 0)
+        return Int(setxattr(cpath, name, UnsafeRawPointer(buf), bytes.count, 0, 0))
     }
 
     static func tokenSidecar() -> URL {
