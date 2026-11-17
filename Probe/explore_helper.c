@@ -88,11 +88,16 @@ static void setup_state(void) {
     g_loader    = (uint8_t *)calloc(1, 0x600);
     g_fake_pls  = (uint8_t *)calloc(1, 0x1000);
     memcpy(g_loader + 0x448, &g_fake_pls, 8);
-    g_fake_pls[0xc] = 1;   /* PLS count = 1, satisfies [pls+0xc] read */
+    g_fake_pls[0xc] = 0;   /* PLS count = 0 -> .cold.1 loop is skipped (cbz) */
     memcpy(g_state + 0x08, &g_config, 8);
     memcpy(g_state + 0x438, &g_cache, 8);
     memcpy(g_state + 0x450, &g_app, 8);
     memset(g_config, 0, 0x1000);
+    /* isValid .cold.1 receives x0 = RuntimeState (not loader): it does
+     * `ldr x21,[x0,#0x448]; ldr w8,[x21,#0xc]`. Point state+0x448 at our
+     * fake PLS too, with a small count, so no NULL deref. */
+    memcpy(g_state + 0x448, &g_fake_pls, 8);
+    memcpy(g_state + 0x430, &g_fake_pls, 8);  /* belt-and-suspenders for cache path */
 }
 static void reset_arrays(void) { memset(g_cache, 0, ARR_LEN); memset(g_app, 0, ARR_LEN); }
 
