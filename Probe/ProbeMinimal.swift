@@ -69,22 +69,29 @@ enum Dyld4 {
     /// Read the boot-token xattr as raw bytes (needed to re-apply it after
     /// an atomic write, which drops xattrs).
     static func tokenBytes(_ path: String) -> Data? {
-        let n = "com.apple.dyld".withCString { getxattr(path, $0, nil, 0, 0, 0) }
+        let cpath = strdup(path)!
+        defer { free(cpath) }
+        let name = strdup("com.apple.dyld")!
+        defer { free(name) }
+        let n = getxattr(cpath, name, nil, 0, 0, 0)
         guard n > 0, n <= 256 else { return nil }
         var buf = [UInt8](repeating: 0, count: n)
-        let got = "com.apple.dyld".withCString { name in
-            buf.withUnsafeMutableBytes { getxattr(path, name, $0.baseAddress, n, 0, 0) }
+        let got = buf.withUnsafeMutableBytes { raw in
+            getxattr(cpath, name, raw.baseAddress, n, 0, 0)
         }
         guard got > 0 else { return nil }
         return Data(buf[0..<got])
     }
 
     static func applyToken(_ bytes: Data?, to path: String) -> Int {
-        guard let bytes else { return -1 }
-        return bytes.withUnsafeBytes { raw -> Int in
-            "com.apple.dyld".withCString { name in
-                setxattr(path, name, raw.baseAddress, bytes.count, 0, 0)
-            }
+        guard let bytes, !bytes.isEmpty else { return -1 }
+        let cpath = strdup(path)!
+        defer { free(cpath) }
+        let name = strdup("com.apple.dyld")!
+        defer { free(name) }
+        var buf = [UInt8](bytes)
+        return buf.withUnsafeMutableBytes { raw in
+            setxattr(cpath, name, raw.baseAddress, bytes.count, 0, 0)
         }
     }
 
