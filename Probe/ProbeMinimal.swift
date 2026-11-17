@@ -17,6 +17,7 @@
 import UIKit
 import Foundation
 import Darwin
+import CryptoKit
 
 // MARK: - small helpers
 
