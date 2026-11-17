@@ -118,17 +118,18 @@ enum Closure {
 
 // MARK: - the C exploration helper
 @_silgen_name("probe_explore")
-private func probe_explore(_ out: UnsafeMutablePointer<CChar>, _ outlen: Int) -> Int32
+private func probe_explore(_ path: UnsafePointer<CChar>) -> Int32
 
 enum Explorer {
     static func run() -> String {
-        let cap = 1 << 20 // 1 MiB
-        let buf = UnsafeMutablePointer<CChar>.allocate(capacity: cap)
-        defer { buf.deallocate() }
-        buf.initialize(repeating: 0, count: cap)
-        let rc = probe_explore(buf, cap)
-        if rc != 0 { return "EXPLORE: helper returned \(rc)" }
-        return String(cString: buf)
+        // C helper writes incrementally to this file (survives a partial crash).
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("explore-dump.txt")
+        try? Data().write(to: url)
+        let rc = url.path.withCString { probe_explore($0) }
+        let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if rc != 0 { return content + "\nEXPLORE: helper returned \(rc)" }
+        return content
     }
 }
 
