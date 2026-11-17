@@ -165,8 +165,18 @@ enum CSParserCollector {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         for (i, path) in candidates.enumerated() {
             var r = Result(); r.path = path
+            // Distinguish ENOENT (file absent) from EPERM/EACCES (sandbox
+            // blocks a file that does exist) — the two answers mean very
+            // different things for the artifact-gap question.
+            let fd = path.withCString { open($0, O_RDONLY) }
+            if fd < 0 {
+                let e = errno
+                r.error = "errno=\(e) " + String(cString: strerror(e))
+                out.append(r); continue
+            }
+            close(fd)
             guard let d = FileManager.default.contents(atPath: path) else {
-                r.error = "not readable (sandbox or absent)"
+                r.error = "open ok but read failed"
                 out.append(r); continue
             }
             r.ok = true; r.size = d.count; r.sha = sha256hex(d)
