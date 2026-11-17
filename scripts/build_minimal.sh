@@ -7,8 +7,16 @@ OUT=out/Minimal
 BUNDLE_ID=${BUNDLE_ID:-com.research.ios27.privprobe}
 rm -rf "$OUT" out/Probe-minimal.ipa
 mkdir -p "$OUT/Probe.app"
+
+# C helper: deterministic dyld OOB crash with correct arm64e ptrauth signing.
+# Compiled for arm64 iOS and linked into the Swift executable.
+clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 \
+      -c Probe/crash_helper.c -o "$OUT/crash_helper.o"
+
 swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 -parse-as-library \
-       -o "$OUT/Probe.app/Probe" Probe/ProbeMinimal.swift
+       "$OUT/crash_helper.o" Probe/ProbeMinimal.swift \
+       -o "$OUT/Probe.app/Probe"
+
 sed "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|$BUNDLE_ID|g; s|\$(EXECUTABLE_NAME)|Probe|g; s|\$(PRODUCT_NAME)|Probe|g" \
     Probe/Info.plist > "$OUT/Probe.app/Info.plist"
 mkdir -p "$OUT/Payload"; cp -R "$OUT/Probe.app" "$OUT/Payload/"

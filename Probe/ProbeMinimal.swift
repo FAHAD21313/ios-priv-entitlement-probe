@@ -269,6 +269,28 @@ enum CSParserCollector {
     }
 }
 
+
+// MARK: - Runtime crash proof — call dyld's unchecked accessor directly
+//
+// The closure PoC proves dyld CONSUMED a crafted closure, but the OOB write
+// landed in mapped heap so the app survived. To obtain an .ips we call the
+// very same function with the validation array on a read-only guard page, so
+// the OOB read succeeds and the OOB write faults: the SIGSEGV PC is the exact
+// unchecked strb instruction inside /usr/lib/dyld.
+// Declared in Probe/crash_helper.c (linked into the app at build time).
+@_silgen_name("probe_crash_dyld")
+private func probe_crash_dyld(_ fire: Int32) -> UnsafePointer<CChar>?
+
+/// Deterministic .ips proof. The heavy lifting (ptrauth signing, guard pages,
+/// the actual call) lives in C; Swift only writes the setup info to the report
+/// BEFORE firing so the evidence survives the crash.
+enum CrashProof {
+    static func run(fire: Bool) -> String {
+        guard let p = probe_crash_dyld(fire ? 1 : 0) else { return "CRASH: no status" }
+        return String(cString: p)
+    }
+}
+
 // MARK: - report
 
 final class Rep {
@@ -336,6 +358,7 @@ final class VC: UIViewController {
     private let status = UILabel()
     private let runBtn = UIButton(type: .system)
     private let pocBtn = UIButton(type: .system)
+    private let crashBtn = UIButton(type: .system)
     private let text = UITextView()
     private var report = ""
 
@@ -349,9 +372,11 @@ final class VC: UIViewController {
         runBtn.addTarget(self, action: #selector(run), for: .touchUpInside)
         pocBtn.setTitle("PoC OOB", for: .normal)
         pocBtn.addTarget(self, action: #selector(poc), for: .touchUpInside)
+        crashBtn.setTitle("Crash OOB", for: .normal)
+        crashBtn.addTarget(self, action: #selector(crashOOB), for: .touchUpInside)
         text.isEditable = false
         text.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
-        let stack = UIStackView(arrangedSubviews: [status, runBtn, pocBtn, text])
+        let stack = UIStackView(arrangedSubviews: [status, runBtn, pocBtn, crashBtn, text])
         stack.axis = .vertical; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -373,6 +398,22 @@ final class VC: UIViewController {
                 self.status.text = "saved to Documents/probe-report.txt + csparser-*.bin"
                 UIPasteboard.general.string = s
             }
+        }
+    }
+
+    @objc private func crashOOB() {
+        crashBtn.isEnabled = false
+        // 1) Persist the setup/expected-PC info to the report BEFORE crashing.
+        //    Rep.add() flushes to disk on every line, so this survives the SIGSEGV.
+        let setup = CrashProof.run(fire: false)
+        let r = Rep(); r.section("CRASH-PROOF"); r.add(setup)
+        r.add("firing unchecked dyld accessor — expect SIGSEGV (EXC_BAD_ACCESS) at dyld")
+        self.report += r.text; self.text.text += r.text
+        UIPasteboard.general.string = self.report
+        status.text = "Firing crash… check Settings › Privacy & Security › Analytics for the .ips"
+        // 2) Fire on a background queue; the process is expected to die here.
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = CrashProof.run(fire: true)
         }
     }
 
