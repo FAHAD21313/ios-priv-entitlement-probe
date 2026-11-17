@@ -75,18 +75,23 @@ static int locate_dyld(uintptr_t *base, const char **image) {
 typedef void (*dyldfn)(void *, void *, unsigned long);
 
 static uint8_t *g_state = NULL, *g_config = NULL, *g_cache = NULL, *g_app = NULL, *g_loader = NULL;
+static uint8_t *g_fake_pls = NULL;
 
 static void setup_state(void) {
     g_state  = (uint8_t *)calloc(1, 0x600);
     g_config = (uint8_t *)calloc(1, 0x1000);   /* state[+8] -> config; isValid reads [config+0x280] */
     g_cache  = (uint8_t *)calloc(1, ARR_LEN);
     g_app    = (uint8_t *)calloc(1, ARR_LEN);
-    g_loader = (uint8_t *)calloc(1, 0x100);
+    /* isValid's .cold.1 calls LoaderRef::loader which reads the PLS pointer
+     * from loader+0x448 and then [pls+0xc] (count). Give the fake loader a
+     * valid fake PLS there so it never dereferences NULL. */
+    g_loader    = (uint8_t *)calloc(1, 0x600);
+    g_fake_pls  = (uint8_t *)calloc(1, 0x1000);
+    memcpy(g_loader + 0x448, &g_fake_pls, 8);
+    g_fake_pls[0xc] = 1;   /* PLS count = 1, satisfies [pls+0xc] read */
     memcpy(g_state + 0x08, &g_config, 8);
     memcpy(g_state + 0x438, &g_cache, 8);
     memcpy(g_state + 0x450, &g_app, 8);
-    /* Fill config with a plausible non-zero pattern so [config+0x280] is a
-     * defined byte (the isValid `cbnz w21` gate). */
     memset(g_config, 0, 0x1000);
 }
 static void reset_arrays(void) { memset(g_cache, 0, ARR_LEN); memset(g_app, 0, ARR_LEN); }
@@ -151,8 +156,10 @@ int probe_explore(const char *path) {
         fflush(f);
     }
 
-    /* C: ref sweep via isValid — NEGATIVE refs only (positive faults on NULL state+0x430) */
-    fprintf(f, "\n[C] REF SWEEP — PrebuiltLoader::isValid (negative refs only)\n"); fflush(f);
+    /* C: ref sweep via isValid — negative refs only. (Positive refs push
+     * isValid into the cache-PLS path which needs a real PLS object graph;
+     * the cache-array case is already covered by recursiveMark in Test A2.) */
+    fprintf(f, "\n[C] REF SWEEP — PrebuiltLoader::isValid (app path, negative refs)\n"); fflush(f);
     static const uint16_t negrefs[] = {
         0xffff,0xfffe,0xfffd,0xff00,0xf000,0xa000,0x9001,0x8001,0x8000
     };
