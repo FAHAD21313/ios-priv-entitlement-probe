@@ -54,6 +54,15 @@ jobs:
             --entitlement com.apple.private.security.no-sandbox
           python3 scripts/make_crafted_ipa.py
 
+      - name: Build the minimal dyld4-OOB + csparser collector
+        run: ./scripts/build_minimal.sh
+
+      - name: Upload the minimal probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Probe-minimal-ipa
+          path: out/Probe-minimal.ipa
+
       - name: Package the app bundle as a zip
         run: |
           cd out

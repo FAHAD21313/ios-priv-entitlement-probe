@@ -1,4 +1,4 @@
-.PHONY: help build ipa crafted scenarios profile identities collect verdict check-report log selftest clean
+.PHONY: help build ipa minimal crafted scenarios profile identities collect verdict check-report log selftest clean
 
 IDENTITY ?=
 TEAM     ?=
@@ -7,6 +7,7 @@ LOGFILE  ?= amfi.log
 
 help:
 	@echo "make build            build the unsigned iOS app and IPA (macOS only)"
+	@echo "make minimal          build the dyld4-OOB + csparser collector (unsigned)"
 	@echo "make crafted          build the crafted-profile experiment IPA (no Mac needed)"
 	@echo "make scenarios        build the signed variant matrix"
 	@echo "make identities       list every signing identity and its Apple class"
@@ -23,6 +24,9 @@ build:
 	./scripts/build_ios.sh
 
 ipa: build
+
+minimal:
+	./scripts/build_minimal.sh
 
 crafted: build
 	@mkdir -p out/variants
