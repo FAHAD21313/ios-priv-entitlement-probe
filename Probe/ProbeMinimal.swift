@@ -75,12 +75,11 @@ enum Dyld4 {
         defer { free(name) }
         let n = getxattr(cpath, name, nil, 0, 0, 0)
         guard n > 0, n <= 256 else { return nil }
-        var buf = [UInt8](repeating: 0, count: n)
-        let got = buf.withUnsafeMutableBytes { raw in
-            getxattr(cpath, name, raw.baseAddress, n, 0, 0)
-        }
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: n)
+        defer { buf.deallocate() }
+        let got = getxattr(cpath, name, buf, n, 0, 0)
         guard got > 0 else { return nil }
-        return Data(buf[0..<got])
+        return Data(bytes: buf, count: got)
     }
 
     static func applyToken(_ bytes: Data?, to path: String) -> Int {
@@ -89,10 +88,10 @@ enum Dyld4 {
         defer { free(cpath) }
         let name = strdup("com.apple.dyld")!
         defer { free(name) }
-        var buf = [UInt8](bytes)
-        return buf.withUnsafeMutableBytes { raw in
-            setxattr(cpath, name, raw.baseAddress, bytes.count, 0, 0)
-        }
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+        defer { buf.deallocate() }
+        bytes.copyBytes(to: buf, count: bytes.count)
+        return setxattr(cpath, name, UnsafeRawPointer(buf), bytes.count, 0, 0)
     }
 
     static func tokenSidecar() -> URL {
