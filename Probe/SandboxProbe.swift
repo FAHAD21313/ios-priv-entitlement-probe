@@ -70,13 +70,6 @@ func runSandboxProbe() -> String {
         }
         if sem.wait(timeout: .now() + 10) == .timedOut { outcome = "timeout" }
         r.add("thumbnail-result=\(outcome)")
-        // Deprecated saveBestRepresentation (the one agent says goes to agent)
-        if let req2 = (try? QLThumbnailGenerator.Request(fileAt: img, size: CGSize(width: 64, height: 64),
-                        scale: 1, representationTypes: .thumbnail)) {
-            QLThumbnailGenerator.shared.saveBestRepresentation(for: req2) { err in
-                r.add("saveBest-result=\(err == nil ? "OK" : "error: \(err!.localizedDescription)")")
-            }
-        }
     } else { r.add("thumbnail-result=no-test-image") }
 
     // File access to interesting paths
