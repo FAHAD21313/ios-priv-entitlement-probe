@@ -1,8 +1,9 @@
 //
 //  SandboxProbe.swift
-//  Sandbox reachability probe — iOS 27.0.1, free-signed app, one button.
+//  Sandbox reachability probe — iOS 27.0.1, free-signed app, two buttons.
 //  Non-destructive: opens IOKit handles, looks up Mach ports, generates a
 //  thumbnail via public API, checks file access. Writes probe-report.txt.
+//  Button 2 (SharingdProbe.swift) tests the sharingd NSXPC "door" at runtime.
 //
 
 import UIKit
@@ -15,9 +16,11 @@ private func probe_sandbox(_ path: UnsafePointer<CChar>) -> Int32
 
 final class Rep {
     private var lines: [String] = []
+    private let lock = NSLock()   // NSXPC handlers may log from arbitrary queues
     private let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         .appendingPathComponent("probe-report.txt")
     func add(_ s: String) {
+        lock.lock(); defer { lock.unlock() }
         lines.append(s)
         if let h = FileHandle(forWritingAtPath: url.path) {
             h.seekToEndOfFile(); h.write(Data((s + "\n").utf8)); try? h.close()
@@ -89,23 +92,28 @@ func runSandboxProbe() -> String {
 final class VC: UIViewController {
     private let status = UILabel()
     private let btn = UIButton(type: .system)
+    private let btnSharingd = UIButton(type: .system)
     private let text = UITextView()
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         title = "Sandbox Probe"
-        status.text = "Tap once. Non-destructive reachability check."; status.numberOfLines = 0
+        status.text = "Non-destructive reachability checks. Tap either button."; status.numberOfLines = 0
         btn.setTitle("Probe Sandbox", for: .normal); btn.titleLabel?.font = .boldSystemFont(ofSize: 18)
         btn.addTarget(self, action: #selector(go), for: .touchUpInside)
+        btnSharingd.setTitle("Probe sharingd NSXPC", for: .normal)
+        btnSharingd.titleLabel?.font = .boldSystemFont(ofSize: 18)
+        btnSharingd.addTarget(self, action: #selector(goSharingd), for: .touchUpInside)
         text.font = .monospacedSystemFont(ofSize: 10, weight: .regular); text.isEditable = false
-        let st = UIStackView(arrangedSubviews: [status, btn, text]); st.axis = .vertical; st.spacing = 10
+        let st = UIStackView(arrangedSubviews: [status, btn, btnSharingd, text]); st.axis = .vertical; st.spacing = 10
         st.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(st)
         NSLayoutConstraint.activate([
             st.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
             st.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             st.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             st.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
-            btn.heightAnchor.constraint(equalToConstant: 44)
+            btn.heightAnchor.constraint(equalToConstant: 44),
+            btnSharingd.heightAnchor.constraint(equalToConstant: 44)
         ])
     }
     @objc private func go() {
@@ -115,6 +123,16 @@ final class VC: UIViewController {
             DispatchQueue.main.async {
                 self.text.text = res; self.status.text = "Done — see probe-report.txt"
                 UIPasteboard.general.string = res; self.btn.isEnabled = true
+            }
+        }
+    }
+    @objc private func goSharingd() {
+        btnSharingd.isEnabled = false; status.text = "Probing sharingd NSXPC…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = runSharingdProbe()   // SharingdProbe.swift (appends to probe-report.txt)
+            DispatchQueue.main.async {
+                self.text.text = res; self.status.text = "Done — see probe-report.txt (appended)"
+                UIPasteboard.general.string = res; self.btnSharingd.isEnabled = true
             }
         }
     }
