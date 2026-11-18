@@ -23,7 +23,7 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios16.0 \
-                 Probe/main.swift Probe/SandboxProbe.swift Probe/SharingdProbe.swift
+                 Probe/main.swift Probe/SandboxProbe.swift
 
       - name: Build sandbox reachability probe
         run: ./scripts/build_sandbox.sh

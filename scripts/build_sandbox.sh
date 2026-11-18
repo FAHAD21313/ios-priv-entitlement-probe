@@ -12,7 +12,7 @@ clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 \
       -c Probe/sandbox_helper.c -o "$OUT/sandbox_helper.o"
 
 swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 \
-       Probe/main.swift Probe/SandboxProbe.swift Probe/SharingdProbe.swift "$OUT/sandbox_helper.o" \
+       Probe/main.swift Probe/SandboxProbe.swift "$OUT/sandbox_helper.o" \
        -framework IOKit \
        -o "$OUT/Probe.app/Probe"
 
