@@ -86,11 +86,11 @@ private final class Watch {
 private func runConnectOnly(rep: Rep, connections: inout [NSXPCConnection]) {
     let w = Watch("CONNECT-ONLY", rep)
     w.log("creating NSXPCConnection(machServiceName: com.apple.sharingd.nsxpc, options: [])")
-    let c = NSXPCConnection(machServiceName: "com.apple.sharingd.nsxpc", options: [])
-    c.invalidationHandler = { [weak w, weak c] in
+    let c = NSXPCConnection(machServiceName: "com.apple.sharingd.nsxpc")
+    c.invalidationHandler = { [weak w] in
         guard let w = w else { return }
         w.markInvalidated()
-        w.log("invalidationHandler fired" + (c?.invalidationError.map { " error=\($0)" } ?? ""))
+        w.log("invalidationHandler fired")
     }
     c.interruptionHandler = { [weak w] in
         guard let w = w else { return }
@@ -116,13 +116,13 @@ private func runProtocolProbe(label: String, objcProto: Protocol,
     let w = Watch(label, rep)
     let iface = NSXPCInterface(with: objcProto)
     w.log("creating connection; remoteObjectInterface=exportedInterface=NSXPCInterface(\(label))")
-    let c = NSXPCConnection(machServiceName: "com.apple.sharingd.nsxpc", options: [])
+    let c = NSXPCConnection(machServiceName: "com.apple.sharingd.nsxpc")
     c.remoteObjectInterface = iface
     c.exportedInterface = iface
-    c.invalidationHandler = { [weak w, weak c] in
+    c.invalidationHandler = { [weak w] in
         guard let w = w else { return }
         w.markInvalidated()
-        w.log("invalidationHandler fired" + (c?.invalidationError.map { " error=\($0)" } ?? ""))
+        w.log("invalidationHandler fired")
     }
     c.interruptionHandler = { [weak w] in
         guard let w = w else { return }
