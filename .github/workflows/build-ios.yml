@@ -23,13 +23,13 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios16.0 \
-                 Probe/main.swift Probe/ProbeMinimal.swift
+                 Probe/main.swift Probe/SandboxProbe.swift
 
-      - name: Build our app (unsigned IPA)
-        run: ./scripts/build_minimal.sh
+      - name: Build sandbox reachability probe
+        run: ./scripts/build_sandbox.sh
 
       - name: Upload our app
         uses: actions/upload-artifact@v4
         with:
           name: Probe-ipa
-          path: out/Probe-minimal.ipa
+          path: out/Sandbox-probe.ipa
