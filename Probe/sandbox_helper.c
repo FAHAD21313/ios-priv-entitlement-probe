@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* iOS SDK does not declare bootstrap_look_up; declare it ourselves. */
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
+
 /* mach_lookup via bootstrap (safe: just look up, do not send) */
 static mach_port_t lookup(const char *name) {
     mach_port_t p = MACH_PORT_NULL;
