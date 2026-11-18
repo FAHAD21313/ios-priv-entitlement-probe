@@ -29,7 +29,7 @@ final class Rep {
 
 func makeTinyPNG() -> URL? {
     // 1x1 transparent PNG
-    let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/wFfC+2AAAAAElFTkSuQmCC"
+    let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg=="
     guard let d = Data(base64Encoded: b64) else { return nil }
     let u = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         .appendingPathComponent("tiny.png")
