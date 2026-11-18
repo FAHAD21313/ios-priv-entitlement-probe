@@ -13,6 +13,7 @@ clang -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 \
 
 swiftc -O -sdk "$SDK" -target arm64-apple-ios16.0 \
        Probe/main.swift Probe/SandboxProbe.swift "$OUT/sandbox_helper.o" \
+       -framework IOKit \
        -o "$OUT/Probe.app/Probe"
 
 sed "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|$BUNDLE_ID|g; s|\$(EXECUTABLE_NAME)|Probe|g; s|\$(PRODUCT_NAME)|Probe|g" \
