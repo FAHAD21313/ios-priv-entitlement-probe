@@ -34,6 +34,7 @@ int probe_sandbox(const char *path) {
     /* ---- Mach service lookup ---- */
     fprintf(f, "\n[MACH] bootstrap_look_up (non-null means reachable)\n"); fflush(f);
     static const char *services[] = {
+        "com.apple.sharingd.nsxpc",
         "com.apple.quicklook.ThumbnailsAgent",
         "com.apple.quicklook.QLThumbnailGenerator",
         "com.apple.MobileQuickLook",
