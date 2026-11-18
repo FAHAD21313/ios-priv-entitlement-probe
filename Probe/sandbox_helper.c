@@ -6,6 +6,7 @@
  */
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#include <mach/bootstrap.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <stdint.h>
@@ -46,7 +47,7 @@ int probe_sandbox(const char *path) {
         "AppleAVDUserClient"
     };
     for (unsigned i = 0; i < sizeof(classes)/sizeof(classes[0]); i++) {
-        io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault,
+        io_service_t svc = IOServiceGetMatchingService(0,
                               IOServiceMatching(classes[i]));
         if (svc == IO_OBJECT_NULL) {
             fprintf(f, "  %-38s service=NOT-FOUND\n", classes[i]);
